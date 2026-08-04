@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Write};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -853,6 +854,12 @@ pub struct ImageCache {
     /// Whether mdterm is running inside a tmux session.
     /// Used by the render layer to wrap escape sequences in DCS passthrough.
     in_tmux: bool,
+    /// Directory of the currently open markdown file. Local image references
+    /// are resolved relative to this, not the process's working directory.
+    base_dir: PathBuf,
+    /// Configured "default attachment folder" name (relative to `base_dir`),
+    /// used as a fallback for bare-filename wikilink embeds.
+    attachments_dir: String,
 
     // Kitty: image uploaded once, placed per-frame (None = encode failed)
     kitty_images: HashMap<String, Option<KittyImage>>,
@@ -904,6 +911,8 @@ impl ImageCache {
             images: HashMap::new(),
             protocol,
             in_tmux,
+            base_dir: PathBuf::from("."),
+            attachments_dir: "attachments".to_string(),
             kitty_images: HashMap::new(),
             kitty_unicode_images: HashMap::new(),
             // Starts at 0; wrapping_add(1) before first use ensures IDs begin at 1.
@@ -927,6 +936,31 @@ impl ImageCache {
 
     pub fn protocol(&self) -> ImageProtocol {
         self.protocol
+    }
+
+    /// Set the directory of the currently open markdown file. Local image
+    /// references are resolved relative to this directory. Call on every
+    /// rebuild so switching files takes effect.
+    pub fn set_base_dir(&mut self, dir: PathBuf) {
+        if dir == self.base_dir {
+            return;
+        }
+        self.base_dir = dir;
+        self.images.clear();
+        self.cancel_in_flight();
+        self.kitty_images.clear();
+        self.kitty_unicode_images.clear();
+        self.iterm2_images.clear();
+        self.sixel_images.clear();
+        self.halfblock_images.clear();
+        self.delete_temp_files();
+        self.terminology_images.clear();
+    }
+
+    /// Set the configured "default attachment folder" name (relative to
+    /// `base_dir`), used as a fallback for bare-filename wikilink embeds.
+    pub fn set_attachments_dir(&mut self, dir: String) {
+        self.attachments_dir = dir;
     }
 
     pub fn update_cell_aspect(&mut self) {
@@ -979,13 +1013,16 @@ impl ImageCache {
         self.in_flight.insert(url.to_string());
         let sender = self.sender.clone();
         let url_owned = url.to_string();
+        let base_dir = self.base_dir.clone();
+        let attachments_dir = self.attachments_dir.clone();
         std::thread::spawn(move || {
             // Guard against panics in image decoding/downscaling so that
             // the channel always receives a result and the in_flight slot
             // is freed by poll_completed(). Without this, a panic would
             // leave the URL stuck in in_flight permanently.
             let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fetch_image(&url_owned).map(|img| downscale(img, MAX_SOURCE_DIM))
+                fetch_image(&url_owned, &base_dir, &attachments_dir)
+                    .map(|img| downscale(img, MAX_SOURCE_DIM))
             }))
             .unwrap_or(None);
             let _ = sender.send((url_owned, img));
@@ -1034,6 +1071,12 @@ impl ImageCache {
         self.images.insert(url.to_string(), img.map(Arc::new));
     }
 
+    /// Current base directory (used in tests).
+    #[cfg(test)]
+    pub(crate) fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
     pub fn image_dimensions(&self, url: &str) -> Option<(u32, u32)> {
         self.images.get(url)?.as_ref().map(|img| img.dimensions())
     }
@@ -1064,7 +1107,8 @@ impl ImageCache {
         if self.images.contains_key(url) {
             return;
         }
-        let img = fetch_image(url).map(|img| Arc::new(downscale(img, MAX_SOURCE_DIM)));
+        let img = fetch_image(url, &self.base_dir, &self.attachments_dir)
+            .map(|img| Arc::new(downscale(img, MAX_SOURCE_DIM)));
         self.images.insert(url.to_string(), img);
     }
 
@@ -1123,6 +1167,8 @@ impl ImageCache {
         // Clone the Arc so the background thread can register temp paths even if
         // the render channel is replaced before the thread completes (M3 fix).
         let temp_files_ref = Arc::clone(&self.temp_files);
+        let base_dir = self.base_dir.clone();
+        let attachments_dir = self.attachments_dir.clone();
         std::thread::spawn(move || {
             // SAFETY (AssertUnwindSafe): all captured values are either owned
             // or wrapped in Arc/Mutex, which are both Send + unwind-safe at the
@@ -1148,6 +1194,8 @@ impl ImageCache {
                     cell_metrics,
                     bg,
                     kitty_id,
+                    &base_dir,
+                    &attachments_dir,
                     terminology.as_ref(),
                 )
             }))
@@ -1789,6 +1837,7 @@ struct TerminologyCtx<'a> {
 }
 
 /// Pre-render an image for a specific protocol on a background thread.
+#[allow(clippy::too_many_arguments)]
 fn pre_render_image(
     img: &DynamicImage,
     protocol: ImageProtocol,
@@ -1796,6 +1845,8 @@ fn pre_render_image(
     cell_metrics: CellMetrics,
     bg: (u8, u8, u8),
     kitty_id: u32,
+    base_dir: &Path,
+    attachments_dir: &str,
     terminology: Option<&TerminologyCtx<'_>>,
 ) -> Option<PreRenderedResult> {
     let (img_w, img_h) = img.dimensions();
@@ -1880,7 +1931,15 @@ fn pre_render_image(
         ImageProtocol::Terminology => {
             let ctx = terminology
                 .expect("pre_render_image: Terminology protocol requires a TerminologyCtx");
-            pre_render_terminology(img, ctx.url, content_width, cell_metrics).map(|ti| {
+            pre_render_terminology(
+                img,
+                ctx.url,
+                content_width,
+                cell_metrics,
+                base_dir,
+                attachments_dir,
+            )
+            .map(|ti| {
                 if ti.is_temp {
                     // Register the temp path in the shared registry *before* wrapping
                     // the result, so it is cleaned up even if the render channel is
@@ -1950,19 +2009,22 @@ fn random_hex_suffix() -> String {
 
 /// Pre-render step for the Terminology protocol.
 /// Resolves the image to a local filesystem path.
-/// - If `url` is a local path that currently exists on disk, returns it as-is
-///   (after canonicalization to an absolute path), provided the resolved path
-///   stays within the current working directory.
+/// - If `url` (after stripping any `mdembed:` prefix) is a local path that
+///   resolves to a file under `base_dir` (or, for embeds, under
+///   `base_dir`/`attachments_dir`), returns it as-is (after canonicalization
+///   to an absolute path), provided the resolved path stays within `base_dir`.
 /// - Otherwise, resizes `img` to the display pixel dimensions and writes it
 ///   atomically to a temporary PNG file in a per-process private temp directory.
 ///
 /// Returns `None` if the resolved path would be unsafe to embed in the escape
-/// sequence, escapes the working directory, or if any I/O operation fails.
+/// sequence, escapes `base_dir`, or if any I/O operation fails.
 fn pre_render_terminology(
     img: &DynamicImage,
     url: &str,
     content_width: usize,
     cell_metrics: CellMetrics,
+    base_dir: &Path,
+    attachments_dir: &str,
 ) -> Option<TerminologyImage> {
     let (img_w, img_h) = img.dimensions();
     let (cols, rows) = calc_display_cells(
@@ -1977,27 +2039,34 @@ fn pre_render_terminology(
     let cols = (cols as u32).clamp(1, 511);
     let rows = (rows as u32).clamp(1, 511);
 
+    let (target, is_embed) = match url.strip_prefix("mdembed:") {
+        Some(t) => (t, true),
+        None => (url, false),
+    };
+
     // Treat http://, https://, file://, and data: URLs as remote/non-local.
     // file:// and data: are not valid filesystem paths; canonicalize would fail
     // for them, so they fall through to the temp-file path.
-    let is_remote = url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("file://")
-        || url.starts_with("data:");
+    let is_remote = target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("file://")
+        || target.starts_with("data:");
 
     // Local file path that still exists on disk — reuse directly, no I/O needed.
     // Terminology requires an absolute path, so canonicalize before passing.
-    if !is_remote && let Ok(abs) = std::fs::canonicalize(url) {
-        // SEC: Reject if the resolved path escapes the working directory.
-        // This prevents symlinks like `./img.png -> /etc/passwd` from
-        // passing an arbitrary system path to Terminology.
-        // Canonicalize the CWD too so both paths use the same prefix form
-        // (important on Windows where canonicalize adds the `\\?\` prefix
-        // but current_dir() does not, causing starts_with to always fail).
-        let cwd = std::env::current_dir()
-            .ok()
-            .and_then(|d| std::fs::canonicalize(d).ok());
-        if cwd.is_some_and(|cwd| !abs.starts_with(&cwd)) {
+    if !is_remote
+        && let Some(resolved) =
+            resolve_local_image_path(target, base_dir, attachments_dir, is_embed)
+        && let Ok(abs) = std::fs::canonicalize(&resolved)
+    {
+        // SEC: Reject if the resolved path escapes base_dir. This prevents
+        // symlinks like `./img.png -> /etc/passwd` from passing an arbitrary
+        // system path to Terminology. Canonicalize base_dir too so both paths
+        // use the same prefix form (important on Windows where canonicalize
+        // adds the `\\?\` prefix but a plain PathBuf does not, causing
+        // starts_with to always fail).
+        let base_canonical = std::fs::canonicalize(base_dir).ok();
+        if base_canonical.is_some_and(|base| !abs.starts_with(&base)) {
             return None;
         }
 
@@ -2106,24 +2175,62 @@ fn downscale(img: DynamicImage, max_dim: u32) -> DynamicImage {
     img.resize(new_w, new_h, FilterType::Lanczos3)
 }
 
-fn fetch_image(url: &str) -> Option<DynamicImage> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        fetch_image_http(url)
-    } else {
-        // Only allow relative paths and paths under the current directory;
-        // reject absolute paths to prevent reading arbitrary local files.
-        let path = std::path::Path::new(url);
-        if path.is_absolute() {
-            return None;
-        }
-        // Reject paths that escape the working directory via ".."
-        for component in path.components() {
-            if matches!(component, std::path::Component::ParentDir) {
-                return None;
-            }
-        }
-        image::open(url).ok()
+/// Resolve a locally-declared image reference to a file that exists on
+/// disk, relative to `base_dir` — the directory of the markdown file that
+/// declared it, not the process's working directory.
+///
+/// `target` must already have any `mdembed:` prefix stripped by the
+/// caller; `is_embed` records whether it came from a wikilink `![[embed]]`
+/// (as opposed to a plain CommonMark `![](path)`), since only embeds fall
+/// back to the `attachments_dir` folder for a bare filename with no
+/// subpath — mirroring Obsidian's own default-attachment-folder behavior.
+///
+/// Returns `None` if `target` is an absolute path or contains a `..`
+/// component (both rejected to prevent a markdown file from reading
+/// arbitrary local files), or if the file doesn't exist at either
+/// candidate location.
+fn resolve_local_image_path(
+    target: &str,
+    base_dir: &Path,
+    attachments_dir: &str,
+    is_embed: bool,
+) -> Option<PathBuf> {
+    let path = Path::new(target);
+    if path.is_absolute() {
+        return None;
     }
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+
+    let direct = base_dir.join(path);
+    if direct.is_file() {
+        return Some(direct);
+    }
+
+    if is_embed && path.components().count() == 1 {
+        let via_attachments = base_dir.join(attachments_dir).join(path);
+        if via_attachments.is_file() {
+            return Some(via_attachments);
+        }
+    }
+
+    None
+}
+
+fn fetch_image(url: &str, base_dir: &Path, attachments_dir: &str) -> Option<DynamicImage> {
+    let (target, is_embed) = match url.strip_prefix("mdembed:") {
+        Some(target) => (target, true),
+        None => (url, false),
+    };
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return fetch_image_http(target);
+    }
+    let path = resolve_local_image_path(target, base_dir, attachments_dir, is_embed)?;
+    image::open(path).ok()
 }
 
 /// Returns true if `host` falls in the RFC 1918 172.16.0.0/12 range (172.16.x.x – 172.31.x.x).
@@ -2326,6 +2433,118 @@ mod tests {
         // Still None — was not replaced by a fresh (failed) attempt.
         assert!(!cache.has_image("local_nonexistent.png"));
         assert!(cache.has_attempted("local_nonexistent.png"));
+    }
+
+    #[test]
+    fn fetch_if_missing_resolves_relative_to_base_dir_not_cwd() {
+        let root = temp_root("mdterm-cache-basedir");
+        std::fs::create_dir_all(&root).unwrap();
+        let img = image::DynamicImage::new_rgb8(4, 4);
+        img.save_with_format(root.join("photo.png"), image::ImageFormat::Png)
+            .unwrap();
+
+        let mut cache = ImageCache::new();
+        cache.set_base_dir(root.clone());
+        cache.fetch_if_missing("photo.png");
+
+        assert!(cache.has_image("photo.png"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fetch_if_missing_embed_falls_back_to_attachments_dir() {
+        let root = temp_root("mdterm-cache-embedfallback");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        let img = image::DynamicImage::new_rgb8(4, 4);
+        img.save_with_format(
+            root.join("attachments").join("photo.png"),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let mut cache = ImageCache::new();
+        cache.set_base_dir(root.clone());
+        cache.set_attachments_dir("attachments".to_string());
+        cache.fetch_if_missing("mdembed:photo.png");
+
+        assert!(cache.has_image("mdembed:photo.png"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fetch_if_missing_plain_image_ignores_attachments_dir() {
+        let root = temp_root("mdterm-cache-plainnofallback");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        let img = image::DynamicImage::new_rgb8(4, 4);
+        img.save_with_format(
+            root.join("attachments").join("photo.png"),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+
+        let mut cache = ImageCache::new();
+        cache.set_base_dir(root.clone());
+        cache.fetch_if_missing("photo.png"); // no mdembed: prefix
+
+        assert!(!cache.has_image("photo.png"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn set_base_dir_change_invalidates_cache_for_shared_filename() {
+        // Two files in different directories both reference "photo.png".
+        // Switching base_dir must not let the second file render the
+        // first file's cached image under the same cache key.
+        let root_a = temp_root("mdterm-cache-basedir-switch-a");
+        let root_b = temp_root("mdterm-cache-basedir-switch-b");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        image::DynamicImage::new_rgb8(4, 4)
+            .save_with_format(root_a.join("photo.png"), image::ImageFormat::Png)
+            .unwrap();
+        image::DynamicImage::new_rgb8(8, 8)
+            .save_with_format(root_b.join("photo.png"), image::ImageFormat::Png)
+            .unwrap();
+
+        let mut cache = ImageCache::new();
+        cache.set_base_dir(root_a.clone());
+        cache.fetch_if_missing("photo.png");
+        assert_eq!(cache.image_dimensions("photo.png"), Some((4, 4)));
+
+        cache.set_base_dir(root_b.clone());
+        cache.fetch_if_missing("photo.png");
+        assert_eq!(
+            cache.image_dimensions("photo.png"),
+            Some((8, 8)),
+            "switching base_dir must invalidate the cache instead of reusing the other file's image"
+        );
+
+        std::fs::remove_dir_all(root_a).unwrap();
+        std::fs::remove_dir_all(root_b).unwrap();
+    }
+
+    #[test]
+    fn set_base_dir_same_dir_does_not_clear_cache() {
+        // Called on every rebuild (resizes, edits to the same file) — must
+        // not defeat the cache when the directory hasn't actually changed.
+        let root = temp_root("mdterm-cache-basedir-nochange");
+        std::fs::create_dir_all(&root).unwrap();
+        image::DynamicImage::new_rgb8(4, 4)
+            .save_with_format(root.join("photo.png"), image::ImageFormat::Png)
+            .unwrap();
+
+        let mut cache = ImageCache::new();
+        cache.set_base_dir(root.clone());
+        cache.fetch_if_missing("photo.png");
+        assert!(cache.has_image("photo.png"));
+
+        cache.set_base_dir(root.clone());
+        assert!(
+            cache.has_image("photo.png"),
+            "re-setting the same base_dir must not clear the cache"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // ── extract_host ─────────────────────────────────────────────────────────
@@ -3103,7 +3322,7 @@ mod tests {
         assert!(
             buf.windows(header_prefix.len()).any(|w| w == header_prefix),
             "header not found in output.\nGot (hex): {:?}",
-            &buf
+            buf
         );
 
         // ── Check placeholder rows ────────────────────────────────────────
@@ -3151,25 +3370,20 @@ mod tests {
         assert_eq!(rows_seen, 2, "expected to find 2 complete rows");
     }
 
-    /// Local-path images (within the current working directory) must reuse the
-    /// original path (`is_temp = false`) and must NOT create a new temp file.
-    ///
-    /// The fixture is written into the current working directory (project root
-    /// during `cargo test`) so that the `canonicalize` result passes the
-    /// `starts_with(cwd)` security check.
+    /// Local-path images (within `base_dir`) must reuse the original path
+    /// (`is_temp = false`) and must NOT create a new temp file.
     #[test]
     fn terminology_no_temp_for_local_path() {
-        // Write the fixture PNG inside cwd so it passes the cwd-confinement check.
-        let cwd = std::env::current_dir().expect("cannot get cwd");
-        let source_path = cwd.join(format!("mdterm-test-source-{}.png", std::process::id()));
-        let source_path_str = source_path.to_str().expect("cwd path is not UTF-8");
+        let root = temp_root("mdterm-terminology-basedir");
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("photo.png");
         {
             let img = image::DynamicImage::new_rgb8(8, 8);
-            img.save_with_format(source_path_str, image::ImageFormat::Png)
+            img.save_with_format(&source_path, image::ImageFormat::Png)
                 .expect("failed to write source fixture PNG");
         }
 
-        let img = image::open(source_path_str).expect("failed to open fixture PNG");
+        let img = image::open(&source_path).expect("failed to open fixture PNG");
         let metrics = CellMetrics {
             aspect: 2.0,
             cell_w_px: 8,
@@ -3181,18 +3395,16 @@ mod tests {
             .map(|rd| rd.flatten().count())
             .unwrap_or(0);
 
-        let result = pre_render_terminology(&img, source_path_str, 80, metrics)
-            .expect("pre_render_terminology returned None for a local path within cwd");
+        let result = pre_render_terminology(&img, "photo.png", 80, metrics, &root, "attachments")
+            .expect("pre_render_terminology returned None for a local path within base_dir");
 
         let after_count = std::fs::read_dir(&priv_dir)
             .map(|rd| rd.flatten().count())
             .unwrap_or(0);
 
-        // canonicalize may resolve symlinks (e.g. on macOS the cwd itself may
-        // have a symlinked component). Compute canonical form for the assertion.
         let canonical_source =
-            std::fs::canonicalize(source_path_str).unwrap_or_else(|_| source_path.clone());
-        let _ = std::fs::remove_file(source_path_str);
+            std::fs::canonicalize(&source_path).unwrap_or_else(|_| source_path.clone());
+        std::fs::remove_dir_all(&root).ok();
 
         assert!(!result.is_temp, "local path must not set is_temp=true");
         assert_eq!(
@@ -3266,6 +3478,116 @@ mod tests {
                 "control byte 0x{b:02x} should be rejected"
             );
         }
+    }
+
+    // ── resolve_local_image_path ────────────────────────────────────────
+
+    fn temp_root(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}"))
+    }
+
+    #[test]
+    fn resolve_local_image_path_finds_file_relative_to_base_dir() {
+        let root = temp_root("mdterm-image-basedir");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("photo.png"), b"fake").unwrap();
+
+        let resolved = resolve_local_image_path("photo.png", &root, "attachments", false);
+        assert_eq!(resolved, Some(root.join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_embed_falls_back_to_attachments_dir() {
+        let root = temp_root("mdterm-image-attachfallback");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        let resolved = resolve_local_image_path("photo.png", &root, "attachments", true);
+        assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_plain_image_does_not_use_attachments_fallback() {
+        let root = temp_root("mdterm-image-noattachfallback");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        // is_embed = false: a bare filename must NOT fall back to attachments/.
+        let resolved = resolve_local_image_path("photo.png", &root, "attachments", false);
+        assert_eq!(resolved, None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_explicit_subpath_does_not_need_fallback() {
+        let root = temp_root("mdterm-image-subpath");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        let resolved =
+            resolve_local_image_path("attachments/photo.png", &root, "attachments", true);
+        assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_rejects_absolute_target() {
+        let root = temp_root("mdterm-image-rejectabs");
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        let abs = "/etc/passwd";
+        #[cfg(windows)]
+        let abs = "C:\\Windows\\win.ini";
+        assert_eq!(
+            resolve_local_image_path(abs, &root, "attachments", true),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_rejects_parent_dir_traversal() {
+        let root = temp_root("mdterm-image-rejectdotdot");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            resolve_local_image_path("../secret.png", &root, "attachments", true),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_missing_file_returns_none() {
+        let root = temp_root("mdterm-image-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(
+            resolve_local_image_path("nope.png", &root, "attachments", true),
+            None
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn resolve_local_image_path_treats_backslash_subpath_as_not_bare() {
+        let root = temp_root("mdterm-image-winsep");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        // A target with an explicit subpath (using the platform separator)
+        // must NOT be treated as a bare filename, so no attachments-folder
+        // fallback is attempted for it.
+        let resolved = resolve_local_image_path("sub\\photo.png", &root, "attachments", true);
+        assert_eq!(resolved, None);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     // ── env save/restore helpers (used by Terminology detection tests) ─────────

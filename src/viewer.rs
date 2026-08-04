@@ -38,6 +38,7 @@ pub struct ViewerOptions {
     pub start_in_picker: bool,
     pub hide: HideConfig,
     pub picker: PickerConfig,
+    pub attachments_dir: String,
 }
 
 pub fn run(opts: ViewerOptions) -> io::Result<()> {
@@ -420,6 +421,9 @@ impl ViewerState {
             None
         };
 
+        let mut image_cache = crate::image::ImageCache::new();
+        image_cache.set_attachments_dir(opts.attachments_dir.clone());
+
         ViewerState {
             files: opts.files,
             current_file_idx: 0,
@@ -461,7 +465,7 @@ impl ViewerState {
             file_change_rx,
             file_change_tx,
             toast: None,
-            image_cache: crate::image::ImageCache::new(),
+            image_cache,
             pending_image_urls: std::collections::VecDeque::new(),
             fast_scrolling: false,
             dirty: true,
@@ -606,6 +610,12 @@ impl ViewerState {
     }
 
     fn rebuild(&mut self) {
+        let base_dir = match std::path::Path::new(&self.filename).parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => std::path::PathBuf::from("."),
+        };
+        self.image_cache.set_base_dir(base_dir);
+
         // Save the scroll position before re-rendering.  finalize_layout()
         // adjusts the offset for image-row expansion, but when called from
         // rebuild() the offset was already correct for the previous layout's
@@ -4855,6 +4865,7 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachments_dir: String::new(),
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.wrapped = lines;
@@ -4978,8 +4989,40 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachments_dir: String::new(),
         };
         ViewerState::new(opts, 80, 24)
+    }
+
+    #[test]
+    fn rebuild_bare_filename_yields_dot_base_dir() {
+        // Path::new("note.md").parent() returns Some("") (not None), so the
+        // old `.unwrap_or(".")` never fired and base_dir became the empty
+        // path, which fails to canonicalize downstream. Opening a file by
+        // bare name must still yield a "." base_dir.
+        let opts = ViewerOptions {
+            files: Vec::new(),
+            initial_content: "hello".to_string(),
+            filename: "note.md".to_string(),
+            theme: crate::theme::Theme::dark(),
+            slide_mode: false,
+            line_numbers: false,
+            width_override: None,
+            picker_root: None,
+            start_in_picker: false,
+            hide: HideConfig::default(),
+            picker: PickerConfig::default(),
+            attachments_dir: String::new(),
+        };
+        let mut state = ViewerState::new(opts, 80, 24);
+        state.rebuild();
+
+        let base_dir = state.image_cache.base_dir();
+        assert_eq!(base_dir, Path::new("."));
+        assert!(
+            std::fs::canonicalize(base_dir).is_ok(),
+            "base_dir must canonicalize successfully"
+        );
     }
 
     #[test]
