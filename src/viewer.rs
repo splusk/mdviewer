@@ -2135,11 +2135,61 @@ fn dispatch_link(state: &mut ViewerState, url: &str) {
             Some(resolved) => navigate_to_resolved(state, resolved, url),
             None => state.set_toast(format!("Wikilink not found: {}", target)),
         }
+    } else if let Some(target) = url.strip_prefix("mdembed:") {
+        let resolved =
+            crate::image::resolve_local_image_path(target, state.image_cache.base_dir(), true);
+        match resolved {
+            Some(path) => match preview_file(&path) {
+                Ok(_) => state.set_toast(format!("Previewing: {}", target)),
+                Err(e) => state.set_toast(format!("Failed to preview: {}", e)),
+            },
+            None => state.set_toast(format!("File not found: {}", target)),
+        }
     } else if let Some(resolved) = resolve_local_link(state, url) {
         navigate_to_resolved(state, resolved, url);
     } else {
         state.set_toast(format!("Blocked: unsupported URL scheme in '{}'", url));
     }
+}
+
+/// Preview a file with the OS's native quick-look viewer: macOS's Quick Look
+/// panel (the same one Space bar triggers in Finder) via `qlmanage -p`, or
+/// `open`'s default-application behavior elsewhere. Spawned detached — the
+/// caller doesn't wait for the preview window to close.
+#[cfg(target_os = "macos")]
+fn preview_file(path: &Path) -> io::Result<()> {
+    let child = std::process::Command::new("qlmanage")
+        .arg("-p")
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    // qlmanage's panel opens behind the terminal by default — launching a
+    // GUI window from a background process doesn't give it focus the way a
+    // Dock/Finder launch would. Bring it to the front via System Events once
+    // it's had a moment to register its window with the window server. This
+    // may prompt the user for Automation/Accessibility permission the first
+    // time; if it's denied, the preview still opens, just behind the terminal.
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn preview_file(path: &Path) -> io::Result<()> {
+    open::that(path).map_err(|e| io::Error::other(e.to_string()))
 }
 
 /// Switch to a resolved `(path, anchor)` target, recording nav history and
@@ -5100,6 +5150,32 @@ mod tests {
                 .as_ref()
                 .is_some_and(|(msg, _)| msg.contains("Wikilink not found")),
             "expected a 'Wikilink not found' toast, got {:?}",
+            state.toast
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn dispatch_link_toasts_on_missing_embed_target() {
+        // Doesn't exercise the actual preview_file() launch (that would spawn
+        // a real GUI process in tests) — only the "not found" short-circuit,
+        // which resolve_local_image_path already covers directly in image.rs.
+        let root = wikilink_temp_root("mdterm-viewer-embed-missing");
+        std::fs::create_dir_all(&root).unwrap();
+        let current = root.join("index.md");
+        std::fs::write(&current, "![[nope.png]]").unwrap();
+
+        let mut state = wikilink_test_state(&current);
+
+        dispatch_link(&mut state, "mdembed:nope.png");
+
+        assert!(
+            state
+                .toast
+                .as_ref()
+                .is_some_and(|(msg, _)| msg.contains("File not found")),
+            "expected a 'File not found' toast, got {:?}",
             state.toast
         );
 
