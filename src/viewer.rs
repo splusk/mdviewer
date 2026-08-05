@@ -38,7 +38,6 @@ pub struct ViewerOptions {
     pub start_in_picker: bool,
     pub hide: HideConfig,
     pub picker: PickerConfig,
-    pub attachments_dir: String,
 }
 
 pub fn run(opts: ViewerOptions) -> io::Result<()> {
@@ -421,8 +420,7 @@ impl ViewerState {
             None
         };
 
-        let mut image_cache = crate::image::ImageCache::new();
-        image_cache.set_attachments_dir(opts.attachments_dir.clone());
+        let image_cache = crate::image::ImageCache::new();
 
         ViewerState {
             files: opts.files,
@@ -4865,7 +4863,6 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
-            attachments_dir: String::new(),
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.wrapped = lines;
@@ -4989,7 +4986,6 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
-            attachments_dir: String::new(),
         };
         ViewerState::new(opts, 80, 24)
     }
@@ -5012,7 +5008,6 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
-            attachments_dir: String::new(),
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.rebuild();
