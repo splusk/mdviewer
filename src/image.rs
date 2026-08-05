@@ -1059,8 +1059,7 @@ impl ImageCache {
         self.images.insert(url.to_string(), img.map(Arc::new));
     }
 
-    /// Current base directory (used in tests).
-    #[cfg(test)]
+    /// Current base directory — the open markdown file's own directory.
     pub(crate) fn base_dir(&self) -> &Path {
         &self.base_dir
     }
@@ -2172,7 +2171,11 @@ fn downscale(img: DynamicImage, max_dim: u32) -> DynamicImage {
 /// component (both rejected to prevent a markdown file from reading
 /// arbitrary local files), or if the file doesn't exist at any candidate
 /// location.
-fn resolve_local_image_path(target: &str, base_dir: &Path, is_embed: bool) -> Option<PathBuf> {
+pub(crate) fn resolve_local_image_path(
+    target: &str,
+    base_dir: &Path,
+    is_embed: bool,
+) -> Option<PathBuf> {
     let path = Path::new(target);
     if path.is_absolute() {
         return None;
