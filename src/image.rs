@@ -444,13 +444,21 @@ fn tmux_wrap(kitty_escape: &[u8]) -> Vec<u8> {
 /// independently and the outer terminal just concatenates the raw bytes tmux
 /// forwards from each envelope, with no awareness that they arrived as
 /// several separate passthrough sequences.
-fn write_tmux_passthrough_chunked(stdout: &mut impl Write, data: &[u8]) -> io::Result<()> {
-    const CHUNK_SIZE: usize = 4096;
-    for chunk in data.chunks(CHUNK_SIZE) {
+fn write_tmux_passthrough_chunked(
+    stdout: &mut impl Write,
+    data: &[u8],
+    chunk_size: usize,
+) -> io::Result<()> {
+    for chunk in data.chunks(chunk_size) {
         stdout.write_all(&tmux_wrap(chunk))?;
     }
     Ok(())
 }
+
+/// Chunk size used for iTerm2's tmux passthrough transmission. Fewer, larger
+/// envelopes mean fewer opportunities for tmux's own output (status line,
+/// etc.) to interleave with an in-progress transmission and corrupt it.
+const ITERM2_TMUX_CHUNK_SIZE: usize = 32 * 1024;
 
 /// Transmit image data via tmux DCS passthrough to the outer terminal.
 fn transmit_kitty_image_tmux(stdout: &mut impl Write, png_data: &[u8], id: u32) -> io::Result<()> {
@@ -1633,7 +1641,7 @@ impl ImageCache {
                 "\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{}\x07",
                 ii.cols, num_rows, data
             );
-            write_tmux_passthrough_chunked(stdout, osc.as_bytes())?;
+            write_tmux_passthrough_chunked(stdout, osc.as_bytes(), ITERM2_TMUX_CHUNK_SIZE)?;
         } else {
             write!(
                 stdout,
@@ -3185,7 +3193,7 @@ mod tests {
     #[test]
     fn write_tmux_passthrough_chunked_small_data_is_one_chunk() {
         let mut out = Vec::new();
-        write_tmux_passthrough_chunked(&mut out, b"hello").unwrap();
+        write_tmux_passthrough_chunked(&mut out, b"hello", 4096).unwrap();
         assert_eq!(out, tmux_wrap(b"hello"));
     }
 
@@ -3200,7 +3208,7 @@ mod tests {
         data.extend(vec![b'b'; 4095]);
 
         let mut out = Vec::new();
-        write_tmux_passthrough_chunked(&mut out, &data).unwrap();
+        write_tmux_passthrough_chunked(&mut out, &data, 4096).unwrap();
 
         let mut reassembled = Vec::new();
         let mut rest = out.as_slice();
