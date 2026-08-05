@@ -172,20 +172,24 @@ pub fn detect_protocol() -> ImageProtocol {
     // "unknown image" rectangle for each placeholder cell.  We therefore
     // query tmux at startup and only select protocols that require DCS
     // passthrough when passthrough is confirmed to be enabled.
+    //
+    // iTerm2 is deliberately NOT selected here even when detected: tmux
+    // doesn't track passthrough-drawn content in its own screen model, so
+    // any later tmux-triggered redraw (its status line, a resize, another
+    // pane, anything) can erase or corrupt an already-displayed iTerm2
+    // inline image. This isn't specific to mdviewer's own escape sequences —
+    // iTerm2's own reference `imgcat` script exhibits the same failure
+    // under tmux. KittyUnicode placeholders don't have this problem because
+    // tmux forwards them as ordinary text characters it re-sends correctly
+    // on every redraw; iTerm2's protocol has no equivalent placeholder form.
     let in_tmux = std::env::var("TMUX").is_ok();
     if in_tmux {
         let passthrough_ok = tmux_allows_passthrough();
         if passthrough_ok {
-            if let Ok(term) = std::env::var("TERM_PROGRAM") {
-                match term.as_str() {
-                    "ghostty" | "WezTerm" => return ImageProtocol::KittyUnicode,
-                    "iTerm.app" => return ImageProtocol::Iterm2,
-                    _ => {}
-                }
-            }
-            // LC_TERMINAL is another way iTerm2 identifies itself.
-            if std::env::var("LC_TERMINAL").ok().as_deref() == Some("iTerm2") {
-                return ImageProtocol::Iterm2;
+            if let Ok(term) = std::env::var("TERM_PROGRAM")
+                && matches!(term.as_str(), "ghostty" | "WezTerm")
+            {
+                return ImageProtocol::KittyUnicode;
             }
             if let Ok(term) = std::env::var("TERM")
                 && (term == "xterm-ghostty" || term == "xterm-kitty")
