@@ -436,6 +436,22 @@ fn tmux_wrap(kitty_escape: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Write an already-built escape sequence through a tmux DCS passthrough,
+/// split into fixed-size chunks first. A single large DCS passthrough blob is
+/// unreliable in real tmux servers (this is why `transmit_kitty_image_tmux`
+/// below chunks the Kitty protocol's own payload) — splitting here is safe
+/// regardless of chunk boundaries, since `tmux_wrap` escapes each chunk
+/// independently and the outer terminal just concatenates the raw bytes tmux
+/// forwards from each envelope, with no awareness that they arrived as
+/// several separate passthrough sequences.
+fn write_tmux_passthrough_chunked(stdout: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    const CHUNK_SIZE: usize = 4096;
+    for chunk in data.chunks(CHUNK_SIZE) {
+        stdout.write_all(&tmux_wrap(chunk))?;
+    }
+    Ok(())
+}
+
 /// Transmit image data via tmux DCS passthrough to the outer terminal.
 fn transmit_kitty_image_tmux(stdout: &mut impl Write, png_data: &[u8], id: u32) -> io::Result<()> {
     let b64 = BASE64.encode(png_data);
@@ -1605,7 +1621,11 @@ impl ImageCache {
         // The cursor-movement (CSI) goes to tmux's virtual screen directly.
         // The image data (OSC) must be wrapped in a tmux DCS passthrough when
         // running inside tmux so that tmux forwards it to the outer terminal
-        // instead of discarding it.
+        // instead of discarding it. Real tmux servers are unreliable with a
+        // single large passthrough blob, so it's sent in chunks (same reason
+        // `transmit_kitty_image_tmux` chunks the Kitty protocol's payload) —
+        // a real-sized photo easily produces a payload that gets silently
+        // dropped unchunked, with no error and no image.
         write!(stdout, "\x1b[{};{}H", screen_y + 1, x_col + 1)?; // 1-based ANSI coords
         if self.in_tmux {
             // Build the OSC sequence as bytes, then wrap for tmux.
@@ -1613,7 +1633,7 @@ impl ImageCache {
                 "\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{}\x07",
                 ii.cols, num_rows, data
             );
-            stdout.write_all(&tmux_wrap(osc.as_bytes()))?;
+            write_tmux_passthrough_chunked(stdout, osc.as_bytes())?;
         } else {
             write!(
                 stdout,
@@ -3160,6 +3180,53 @@ mod tests {
         let input = b"hello";
         let wrapped = tmux_wrap(input);
         assert_eq!(wrapped, b"\x1bPtmux;hello\x1b\\");
+    }
+
+    #[test]
+    fn write_tmux_passthrough_chunked_small_data_is_one_chunk() {
+        let mut out = Vec::new();
+        write_tmux_passthrough_chunked(&mut out, b"hello").unwrap();
+        assert_eq!(out, tmux_wrap(b"hello"));
+    }
+
+    /// Data larger than one chunk, with an ESC byte deliberately placed right
+    /// at the chunk boundary, must still reassemble byte-for-byte on the
+    /// receiving side — chunking must never split (or otherwise corrupt) the
+    /// ESC-doubling `tmux_wrap` performs on each chunk independently.
+    #[test]
+    fn write_tmux_passthrough_chunked_reassembles_to_original_data() {
+        let mut data = vec![b'a'; 4095];
+        data.push(0x1b);
+        data.extend(vec![b'b'; 4095]);
+
+        let mut out = Vec::new();
+        write_tmux_passthrough_chunked(&mut out, &data).unwrap();
+
+        let mut reassembled = Vec::new();
+        let mut rest = out.as_slice();
+        while !rest.is_empty() {
+            assert!(
+                rest.starts_with(b"\x1bPtmux;"),
+                "missing DCS envelope start"
+            );
+            rest = &rest[b"\x1bPtmux;".len()..];
+            let end = rest
+                .windows(2)
+                .position(|w| w == b"\x1b\\")
+                .expect("missing DCS envelope terminator");
+            let body = &rest[..end];
+            let mut i = 0;
+            while i < body.len() {
+                reassembled.push(body[i]);
+                if body[i] == 0x1b {
+                    i += 1; // skip the doubled ESC byte
+                }
+                i += 1;
+            }
+            rest = &rest[end + 2..];
+        }
+
+        assert_eq!(reassembled, data);
     }
 
     // ── Terminology protocol ────────────────────────────────────────────────
