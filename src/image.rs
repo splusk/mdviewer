@@ -721,6 +721,45 @@ fn sixel_color_ranges(colors: &[((u8, u8, u8), u32)]) -> (u8, u8, u8) {
 /// Default placeholder rows when image dimensions are unknown
 pub const IMAGE_ROWS: usize = 8;
 
+/// Local file extensions the `image` crate (and therefore every inline
+/// rendering protocol) can actually decode.
+const RENDERABLE_IMAGE_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff",
+];
+
+/// Whether `url` is something mdviewer can attempt to decode and render as
+/// inline pixels, as opposed to just a clickable reference.
+///
+/// A wikilink embed's target isn't necessarily an image at all —
+/// `![[resume.pdf]]` is a common way to attach any file in an Obsidian vault,
+/// not just photos, and a plain CommonMark image can equally point at any
+/// URL. Attempting to decode a PDF (or any other non-image format) as an
+/// `image::DynamicImage` always fails, which previously left a
+/// `[ Loading: ... ]` placeholder that could never resolve. Checking the
+/// extension up front means markdown.rs never reserves placeholder rows or
+/// queues a fetch for a target that was never going to decode.
+///
+/// Remote URLs (`http://`, `https://`, `data:`) are always considered
+/// renderable, since their real content type can't be known from the URL
+/// alone without fetching it first — this preserves existing behavior there.
+pub(crate) fn is_renderable_locally(url: &str) -> bool {
+    let target = url.strip_prefix("mdembed:").unwrap_or(url);
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("data:")
+    {
+        return true;
+    }
+    Path::new(target)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            RENDERABLE_IMAGE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(ext))
+        })
+}
+
 /// Maximum image rows to allow (all protocols)
 const MAX_IMAGE_ROWS: usize = 20;
 
@@ -3478,6 +3517,41 @@ mod tests {
                 "control byte 0x{b:02x} should be rejected"
             );
         }
+    }
+
+    // ── is_renderable_locally ────────────────────────────────────────────
+
+    #[test]
+    fn is_renderable_locally_accepts_known_image_extensions() {
+        for ext in [
+            "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff",
+        ] {
+            let url = format!("mdembed:attachments/photo.{ext}");
+            assert!(is_renderable_locally(&url), "{ext} should be renderable");
+        }
+    }
+
+    #[test]
+    fn is_renderable_locally_is_case_insensitive() {
+        assert!(is_renderable_locally("mdembed:attachments/photo.PNG"));
+    }
+
+    #[test]
+    fn is_renderable_locally_rejects_pdf() {
+        assert!(!is_renderable_locally("mdembed:attachments/resume.pdf"));
+        assert!(!is_renderable_locally("attachments/resume.pdf"));
+    }
+
+    #[test]
+    fn is_renderable_locally_rejects_no_extension() {
+        assert!(!is_renderable_locally("mdembed:attachments/README"));
+    }
+
+    #[test]
+    fn is_renderable_locally_always_true_for_remote_urls() {
+        assert!(is_renderable_locally("https://example.com/file.pdf"));
+        assert!(is_renderable_locally("http://example.com/no-extension"));
+        assert!(is_renderable_locally("data:image/png;base64,abc"));
     }
 
     // ── resolve_local_image_path ────────────────────────────────────────
