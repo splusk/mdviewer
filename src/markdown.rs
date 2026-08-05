@@ -940,14 +940,11 @@ impl<'a> Renderer<'a> {
                 self.image_alt.clear();
             }
             Event::End(TagEnd::Image) => {
-                // Hidden images emit nothing at all — no placeholder rows and no
-                // caption. viewer.rs queues downloads by scanning for
-                // LineMeta::Image lines, so emitting none also means nothing is
-                // ever fetched. Also suppressed: an image nested inside a link's
-                // label when `images_in_links` is set — e.g. a decorative icon
-                // prefixing a link, which would otherwise break the link's line
+                // Suppressed entirely regardless of anything below: an image
+                // nested inside a link's label (e.g. a decorative icon
+                // prefixing a link) would otherwise break the link's line
                 // into a text line + an image block + a caption line.
-                if self.hide.images || (self.hide.images_in_links && self.in_link) {
+                if self.hide.images_in_links && self.in_link {
                     self.image_alt.clear();
                     self.image_url.clear();
                     self.in_image = false;
@@ -960,26 +957,50 @@ impl<'a> Renderer<'a> {
                     std::mem::take(&mut self.image_alt)
                 };
                 let url = std::mem::take(&mut self.image_url);
+                self.in_image = false;
+
+                let is_wikilink_embed = url.starts_with("mdembed:");
+
+                // Plain (non-wikilink) images are fully suppressed by
+                // `hide.images` — no placeholder rows, no caption at all
+                // (unchanged). Wikilink embeds fall through to the
+                // caption-only path below instead: they're also a reference
+                // to a real file (openable via Quick Look — see
+                // dispatch_link's `mdembed:` handling in viewer.rs), so
+                // hiding the inline render shouldn't hide the reference too.
+                if self.hide.images && !is_wikilink_embed {
+                    return;
+                }
 
                 // Flush any pending content
                 self.flush_line();
 
-                let total_rows = crate::image::IMAGE_ROWS;
-
-                // Push placeholder lines for the image
-                for row in 0..total_rows {
-                    self.lines.push(Line {
-                        spans: vec![],
-                        meta: LineMeta::Image {
-                            url: url.clone(),
-                            alt: alt.clone(),
-                            row,
-                            total_rows,
-                        },
-                    });
+                // Only reserve placeholder rows for an inline pixel render
+                // when inline images aren't disabled AND the target is a
+                // format we can actually decode. This is also what fixes
+                // non-image wikilink embeds like PDFs, which previously got
+                // placeholder rows that could never resolve (stuck on
+                // "[ Loading: ... ]" forever) since they can't be decoded as
+                // an image at all — see crate::image::is_renderable_locally.
+                // Skipping the reservation (rather than rendering then
+                // hiding it) also means no blank rows are left behind where
+                // pixels were never going to appear.
+                if !self.hide.images && crate::image::is_renderable_locally(&url) {
+                    let total_rows = crate::image::IMAGE_ROWS;
+                    for row in 0..total_rows {
+                        self.lines.push(Line {
+                            spans: vec![],
+                            meta: LineMeta::Image {
+                                url: url.clone(),
+                                alt: alt.clone(),
+                                row,
+                                total_rows,
+                            },
+                        });
+                    }
                 }
 
-                // Caption line below the image
+                // Caption line — the only visible line when not rendered inline.
                 self.push_span(
                     &format!("  {}", alt),
                     Style {
@@ -995,8 +1016,6 @@ impl<'a> Renderer<'a> {
                     },
                 );
                 self.flush_line();
-
-                self.in_image = false;
             }
 
             Event::Start(Tag::Table(alignments)) => {
@@ -1944,6 +1963,61 @@ mod tests {
             text.contains("before") && text.contains("after"),
             "surrounding content should survive: {text}"
         );
+    }
+
+    #[test]
+    fn hidden_images_still_show_wikilink_embed_caption() {
+        // Unlike a plain image, a wikilink embed is also a reference to a
+        // real file (openable via Quick Look) - hiding the inline render
+        // shouldn't hide the reference itself.
+        let input = "before\n\n![[photo.png]]\n\nafter";
+        let (lines, _) = render_hiding(input, &hide_images());
+        let text = all_text(&lines);
+
+        assert!(
+            !lines
+                .iter()
+                .any(|l| matches!(l.meta, LineMeta::Image { .. })),
+            "no placeholder rows should be emitted when images are hidden"
+        );
+        assert!(
+            text.contains("photo.png"),
+            "the wikilink embed's caption/link should still render: {text}"
+        );
+    }
+
+    #[test]
+    fn non_image_wikilink_embed_shows_caption_only_no_placeholder_rows() {
+        // A wikilink embed pointing at a non-image file (e.g. a PDF attached
+        // via Obsidian) can never be decoded as an image - it must not get
+        // placeholder rows that would be stuck on "[ Loading: ... ]" forever.
+        let input = "![[resume.pdf]]";
+        let (lines, _) = render_test(input);
+        let text = all_text(&lines);
+
+        assert!(
+            !lines
+                .iter()
+                .any(|l| matches!(l.meta, LineMeta::Image { .. })),
+            "no placeholder rows should be reserved for a non-image embed"
+        );
+        assert!(
+            text.contains("resume.pdf"),
+            "the caption/link should still render: {text}"
+        );
+    }
+
+    #[test]
+    fn non_image_wikilink_embed_caption_is_still_clickable() {
+        let input = "![[resume.pdf]]";
+        let (lines, _) = render_test(input);
+
+        let has_link = lines.iter().any(|l| {
+            l.spans
+                .iter()
+                .any(|s| s.style.link_url.as_deref() == Some("mdembed:resume.pdf"))
+        });
+        assert!(has_link, "the caption should carry the mdembed: link URL");
     }
 
     fn hide_images_in_links() -> HideConfig {
