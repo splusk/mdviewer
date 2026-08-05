@@ -67,7 +67,18 @@ pub fn run(opts: ViewerOptions) -> io::Result<()> {
         }
 
         if state.dirty {
-            render_frame(&mut stdout, &mut state)?;
+            // Render into an in-memory buffer and write it in one shot, rather
+            // than through Stdout's own small internal buffer, which would
+            // otherwise auto-flush partway through a frame at arbitrary byte
+            // boundaries — splitting a single frame (border, content, and any
+            // inline image data) into several separate write() syscalls. Under
+            // tmux, each such syscall is a chance for tmux's own housekeeping
+            // output (status line, etc.) to interleave with this frame's
+            // bytes, corrupting an in-flight image escape sequence.
+            let mut frame = Vec::new();
+            render_frame(&mut frame, &mut state)?;
+            stdout.write_all(&frame)?;
+            stdout.flush()?;
             state.dirty = false;
         }
 
@@ -2778,7 +2789,7 @@ fn copy_to_clipboard(text: &str) -> io::Result<()> {
 
 // ── Rendering ───────────────────────────────────────────────────────────────
 
-fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<()> {
+fn render_frame(stdout: &mut impl Write, state: &mut ViewerState) -> io::Result<()> {
     let width = state.cols as usize;
     let viewport = state.viewport();
     let content_width = width.saturating_sub(4);
@@ -3130,7 +3141,7 @@ fn render_frame(stdout: &mut io::Stdout, state: &mut ViewerState) -> io::Result<
     stdout.flush()
 }
 
-fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_status_bar(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let width = state.cols as usize;
     let viewport = state.viewport();
     let theme = &state.theme;
@@ -3401,7 +3412,7 @@ fn render_status_bar(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result
 
 // ── Overlay rendering ───────────────────────────────────────────────────────
 
-fn render_toast_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_toast_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let Some((msg, _)) = state.toast.as_ref() else {
         return Ok(());
     };
@@ -3461,7 +3472,7 @@ fn render_toast_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Res
     Ok(())
 }
 
-fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_toc_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let theme = &state.theme;
     let entries = &state.toc_entries;
     let width = state.cols as usize;
@@ -3618,7 +3629,7 @@ fn render_toc_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Resul
     Ok(())
 }
 
-fn render_link_picker_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_link_picker_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let theme = &state.theme;
     let entries = &state.link_entries;
     let width = state.cols as usize;
@@ -3767,7 +3778,7 @@ fn render_link_picker_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> i
     Ok(())
 }
 
-fn render_fuzzy_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_fuzzy_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let theme = &state.theme;
     let width = state.cols as usize;
     let viewport = state.viewport();
@@ -3978,7 +3989,7 @@ fn render_fuzzy_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Res
     Ok(())
 }
 
-fn render_file_picker_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_file_picker_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let Some(picker) = state.file_picker.as_ref() else {
         return Ok(());
     };
@@ -4268,7 +4279,7 @@ pub(crate) fn help_box_dimensions(
     (key_col, desc_col, box_w, box_h, visible_rows)
 }
 
-fn render_help_overlay(stdout: &mut io::Stdout, state: &ViewerState) -> io::Result<()> {
+fn render_help_overlay(stdout: &mut impl Write, state: &ViewerState) -> io::Result<()> {
     let theme = &state.theme;
     let width = state.cols as usize;
     let viewport = state.viewport();
@@ -4565,7 +4576,7 @@ fn apply_search_highlights(
 }
 
 fn write_span(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     span: &StyledSpan,
     restore_bg: Option<Color>,
 ) -> io::Result<()> {

@@ -172,20 +172,24 @@ pub fn detect_protocol() -> ImageProtocol {
     // "unknown image" rectangle for each placeholder cell.  We therefore
     // query tmux at startup and only select protocols that require DCS
     // passthrough when passthrough is confirmed to be enabled.
+    //
+    // iTerm2 is deliberately NOT selected here even when detected: tmux
+    // doesn't track passthrough-drawn content in its own screen model, so
+    // any later tmux-triggered redraw (its status line, a resize, another
+    // pane, anything) can erase or corrupt an already-displayed iTerm2
+    // inline image. This isn't specific to mdviewer's own escape sequences —
+    // iTerm2's own reference `imgcat` script exhibits the same failure
+    // under tmux. KittyUnicode placeholders don't have this problem because
+    // tmux forwards them as ordinary text characters it re-sends correctly
+    // on every redraw; iTerm2's protocol has no equivalent placeholder form.
     let in_tmux = std::env::var("TMUX").is_ok();
     if in_tmux {
         let passthrough_ok = tmux_allows_passthrough();
         if passthrough_ok {
-            if let Ok(term) = std::env::var("TERM_PROGRAM") {
-                match term.as_str() {
-                    "ghostty" | "WezTerm" => return ImageProtocol::KittyUnicode,
-                    "iTerm.app" => return ImageProtocol::Iterm2,
-                    _ => {}
-                }
-            }
-            // LC_TERMINAL is another way iTerm2 identifies itself.
-            if std::env::var("LC_TERMINAL").ok().as_deref() == Some("iTerm2") {
-                return ImageProtocol::Iterm2;
+            if let Ok(term) = std::env::var("TERM_PROGRAM")
+                && matches!(term.as_str(), "ghostty" | "WezTerm")
+            {
+                return ImageProtocol::KittyUnicode;
             }
             if let Ok(term) = std::env::var("TERM")
                 && (term == "xterm-ghostty" || term == "xterm-kitty")
@@ -435,6 +439,30 @@ fn tmux_wrap(kitty_escape: &[u8]) -> Vec<u8> {
     out.extend_from_slice(b"\x1b\\");
     out
 }
+
+/// Write an already-built escape sequence through a tmux DCS passthrough,
+/// split into fixed-size chunks first. A single large DCS passthrough blob is
+/// unreliable in real tmux servers (this is why `transmit_kitty_image_tmux`
+/// below chunks the Kitty protocol's own payload) — splitting here is safe
+/// regardless of chunk boundaries, since `tmux_wrap` escapes each chunk
+/// independently and the outer terminal just concatenates the raw bytes tmux
+/// forwards from each envelope, with no awareness that they arrived as
+/// several separate passthrough sequences.
+fn write_tmux_passthrough_chunked(
+    stdout: &mut impl Write,
+    data: &[u8],
+    chunk_size: usize,
+) -> io::Result<()> {
+    for chunk in data.chunks(chunk_size) {
+        stdout.write_all(&tmux_wrap(chunk))?;
+    }
+    Ok(())
+}
+
+/// Chunk size used for iTerm2's tmux passthrough transmission. Fewer, larger
+/// envelopes mean fewer opportunities for tmux's own output (status line,
+/// etc.) to interleave with an in-progress transmission and corrupt it.
+const ITERM2_TMUX_CHUNK_SIZE: usize = 32 * 1024;
 
 /// Transmit image data via tmux DCS passthrough to the outer terminal.
 fn transmit_kitty_image_tmux(stdout: &mut impl Write, png_data: &[u8], id: u32) -> io::Result<()> {
@@ -1590,7 +1618,11 @@ impl ImageCache {
         // The cursor-movement (CSI) goes to tmux's virtual screen directly.
         // The image data (OSC) must be wrapped in a tmux DCS passthrough when
         // running inside tmux so that tmux forwards it to the outer terminal
-        // instead of discarding it.
+        // instead of discarding it. Real tmux servers are unreliable with a
+        // single large passthrough blob, so it's sent in chunks (same reason
+        // `transmit_kitty_image_tmux` chunks the Kitty protocol's payload) —
+        // a real-sized photo easily produces a payload that gets silently
+        // dropped unchunked, with no error and no image.
         write!(stdout, "\x1b[{};{}H", screen_y + 1, x_col + 1)?; // 1-based ANSI coords
         if self.in_tmux {
             // Build the OSC sequence as bytes, then wrap for tmux.
@@ -1598,7 +1630,7 @@ impl ImageCache {
                 "\x1b]1337;File=inline=1;width={};height={};preserveAspectRatio=0:{}\x07",
                 ii.cols, num_rows, data
             );
-            stdout.write_all(&tmux_wrap(osc.as_bytes()))?;
+            write_tmux_passthrough_chunked(stdout, osc.as_bytes(), ITERM2_TMUX_CHUNK_SIZE)?;
         } else {
             write!(
                 stdout,
@@ -3140,6 +3172,53 @@ mod tests {
         let input = b"hello";
         let wrapped = tmux_wrap(input);
         assert_eq!(wrapped, b"\x1bPtmux;hello\x1b\\");
+    }
+
+    #[test]
+    fn write_tmux_passthrough_chunked_small_data_is_one_chunk() {
+        let mut out = Vec::new();
+        write_tmux_passthrough_chunked(&mut out, b"hello", 4096).unwrap();
+        assert_eq!(out, tmux_wrap(b"hello"));
+    }
+
+    /// Data larger than one chunk, with an ESC byte deliberately placed right
+    /// at the chunk boundary, must still reassemble byte-for-byte on the
+    /// receiving side — chunking must never split (or otherwise corrupt) the
+    /// ESC-doubling `tmux_wrap` performs on each chunk independently.
+    #[test]
+    fn write_tmux_passthrough_chunked_reassembles_to_original_data() {
+        let mut data = vec![b'a'; 4095];
+        data.push(0x1b);
+        data.extend(vec![b'b'; 4095]);
+
+        let mut out = Vec::new();
+        write_tmux_passthrough_chunked(&mut out, &data, 4096).unwrap();
+
+        let mut reassembled = Vec::new();
+        let mut rest = out.as_slice();
+        while !rest.is_empty() {
+            assert!(
+                rest.starts_with(b"\x1bPtmux;"),
+                "missing DCS envelope start"
+            );
+            rest = &rest[b"\x1bPtmux;".len()..];
+            let end = rest
+                .windows(2)
+                .position(|w| w == b"\x1b\\")
+                .expect("missing DCS envelope terminator");
+            let body = &rest[..end];
+            let mut i = 0;
+            while i < body.len() {
+                reassembled.push(body[i]);
+                if body[i] == 0x1b {
+                    i += 1; // skip the doubled ESC byte
+                }
+                i += 1;
+            }
+            rest = &rest[end + 2..];
+        }
+
+        assert_eq!(reassembled, data);
     }
 
     // ── Terminology protocol ────────────────────────────────────────────────
