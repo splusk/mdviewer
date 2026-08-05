@@ -4,11 +4,17 @@ use std::sync::LazyLock;
 
 use regex::{Captures, Regex};
 
+// Target/heading/alias groups are lazy (`.+?`, not a negated character class)
+// so a literal `]` inside the target — e.g. a filename like
+// `Offer Letter [Name].pdf` — doesn't break the match. Lazy matching still
+// stops at the first real `]]`/`#`/`|` delimiter, same as the character
+// class did for brackets that never appear in the target at all; it only
+// changes behavior when a stray `]` is actually present.
 static EMBED_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"!\[\[([^\]|]+)(?:\|([^\]]+))?\]\]").unwrap());
+    LazyLock::new(|| Regex::new(r"!\[\[(.+?)(?:\|(.+?))?\]\]").unwrap());
 
 static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[\[([^\]|#]+)(?:#([^\]|]+))?(?:\|([^\]]+))?\]\]").unwrap());
+    LazyLock::new(|| Regex::new(r"\[\[(.+?)(?:#(.+?))?(?:\|(.+?))?\]\]").unwrap());
 
 /// Rewrite Obsidian-style `[[wikilinks]]` and `![[embeds]]` into standard
 /// Markdown before the document reaches `pulldown-cmark`, which has no
@@ -259,6 +265,36 @@ mod tests {
     fn preprocess_rewrites_image_embed_with_alt() {
         let out = preprocess("![[photo.png|A nice photo]]");
         assert_eq!(out, "![A nice photo](<mdembed:photo.png>)");
+    }
+
+    #[test]
+    fn preprocess_rewrites_embed_with_brackets_in_filename() {
+        // A single literal `]` inside the target (e.g. from an offer letter
+        // filename like "Offer Letter [Name].pdf") must not stop the match
+        // at that bracket instead of the real closing `]]`.
+        let out = preprocess("![[Offer Letter [Jane Doe] - Corp.pdf]]");
+        assert_eq!(
+            out,
+            "![Offer Letter \\[Jane Doe\\] - Corp.pdf](<mdembed:Offer Letter [Jane Doe] - Corp.pdf>)"
+        );
+    }
+
+    #[test]
+    fn preprocess_rewrites_wikilink_with_brackets_in_target() {
+        let out = preprocess("[[Report [Draft] Notes]]");
+        assert_eq!(
+            out,
+            "[Report \\[Draft\\] Notes](<wikilink:Report [Draft] Notes>)"
+        );
+    }
+
+    #[test]
+    fn preprocess_rewrites_embed_with_brackets_and_explicit_alt() {
+        let out = preprocess("![[Offer Letter [Jane Doe].pdf|Offer Letter]]");
+        assert_eq!(
+            out,
+            "![Offer Letter](<mdembed:Offer Letter [Jane Doe].pdf>)"
+        );
     }
 
     #[test]
