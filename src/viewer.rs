@@ -2147,12 +2147,32 @@ fn dispatch_link(state: &mut ViewerState, url: &str) {
 /// caller doesn't wait for the preview window to close.
 #[cfg(target_os = "macos")]
 fn preview_file(path: &Path) -> io::Result<()> {
-    std::process::Command::new("qlmanage")
+    let child = std::process::Command::new("qlmanage")
         .arg("-p")
         .arg(path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()?;
+
+    // qlmanage's panel opens behind the terminal by default — launching a
+    // GUI window from a background process doesn't give it focus the way a
+    // Dock/Finder launch would. Bring it to the front via System Events once
+    // it's had a moment to register its window with the window server. This
+    // may prompt the user for Automation/Accessibility permission the first
+    // time; if it's denied, the preview still opens, just behind the terminal.
+    let pid = child.id();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(format!(
+                "tell application \"System Events\" to set frontmost of (first process whose unix id is {pid}) to true"
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    });
+
     Ok(())
 }
 
