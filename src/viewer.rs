@@ -541,11 +541,6 @@ impl ViewerState {
             .or_else(|| self.current_file_parent())
             .unwrap_or_else(|| PathBuf::from("."));
 
-        if let Some(cmd) = self.picker.external_command.clone() {
-            self.run_external_picker(&root, &cmd);
-            return;
-        }
-
         if self.file_picker.is_none() {
             self.file_picker = Some(crate::file_picker::FilePickerState::new(
                 root,
@@ -2734,36 +2729,6 @@ fn setup_file_watcher(
         .watch(std::path::Path::new(path), RecursiveMode::NonRecursive)
         .ok()?;
     Some(watcher)
-}
-
-// ── External picker ──────────────────────────────────────────────────────────
-
-impl ViewerState {
-    /// Suspends the TUI, runs `cmd` via an interactive shell (so personal shell
-    /// functions like a custom `p` resolve), and resumes once it exits. Doesn't
-    /// inspect the exit status or output — whatever the command does (open a
-    /// file, cancel) is between the user and their shell.
-    fn run_external_picker(&mut self, root: &Path, cmd: &str) {
-        let mut stdout = io::stdout();
-        let _ = execute!(
-            stdout,
-            Print("\x1b]22;default\x07"),
-            DisableMouseCapture,
-            Show,
-            LeaveAlternateScreen
-        );
-        let _ = disable_raw_mode();
-
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let _ = std::process::Command::new(&shell)
-            .args(["-i", "-c", cmd])
-            .current_dir(root)
-            .status();
-
-        let _ = enable_raw_mode();
-        let _ = execute!(stdout, EnterAlternateScreen, Hide, EnableMouseCapture);
-        self.dirty = true;
-    }
 }
 
 // ── Clipboard ───────────────────────────────────────────────────────────────

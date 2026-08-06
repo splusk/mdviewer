@@ -32,11 +32,11 @@ pub struct PickerConfig {
     /// matched against the query, so anything can be found by typing.
     #[serde(default)]
     pub max_results: usize,
-    /// If set, `p` runs this via `$SHELL -i -c "<command>"` (cwd = the picker's
-    /// root) instead of opening the built-in picker, e.g. to delegate to a
-    /// personal `fzf`-based shell function.
+    /// How to order results: unset/`"name"` sorts alphabetically (default);
+    /// `"mtime,desc"` or `"mtime,asc"` sorts by last-modified time instead.
+    /// Unrecognized values fall back to the alphabetical default.
     #[serde(default)]
-    pub external_command: Option<String>,
+    pub sort_by: Option<String>,
 }
 
 impl PickerConfig {
@@ -49,6 +49,21 @@ impl PickerConfig {
             .iter()
             .any(|ignored| ignored.trim().eq_ignore_ascii_case(name))
     }
+
+    pub fn sort_mode(&self) -> SortMode {
+        match self.sort_by.as_deref() {
+            Some("mtime,desc") => SortMode::Mtime { descending: true },
+            Some("mtime,asc") => SortMode::Mtime { descending: false },
+            _ => SortMode::Name,
+        }
+    }
+}
+
+/// How the file picker orders its results. See `PickerConfig::sort_by`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortMode {
+    Name,
+    Mtime { descending: bool },
 }
 
 /// Content that is parsed but deliberately never rendered.
@@ -204,7 +219,7 @@ mod tests {
             ignore: ignore.iter().map(|s| s.to_string()).collect(),
             hidden,
             max_results: 0,
-            external_command: None,
+            sort_by: None,
         }
     }
 
@@ -232,6 +247,23 @@ mod tests {
     #[test]
     fn ignore_list_matches_file_names_too() {
         assert!(picker(&["scratch.md"], false).skips("scratch.md"));
+    }
+
+    #[test]
+    fn sort_mode_defaults_to_name() {
+        assert_eq!(PickerConfig::default().sort_mode(), SortMode::Name);
+        let mut cfg = picker(&[], false);
+        cfg.sort_by = Some("bogus".to_string());
+        assert_eq!(cfg.sort_mode(), SortMode::Name);
+    }
+
+    #[test]
+    fn sort_mode_parses_mtime_variants() {
+        let mut cfg = picker(&[], false);
+        cfg.sort_by = Some("mtime,desc".to_string());
+        assert_eq!(cfg.sort_mode(), SortMode::Mtime { descending: true });
+        cfg.sort_by = Some("mtime,asc".to_string());
+        assert_eq!(cfg.sort_mode(), SortMode::Mtime { descending: false });
     }
 
     #[test]
