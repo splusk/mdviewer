@@ -28,8 +28,10 @@ vault in the terminal — and adds only the following on top:
 | `[picker] ignore` | Skips files and directories by name in the file picker |
 | `[picker] hidden` | Dot-directories (`.obsidian`, `.git`, `.trash`) are now skipped by default, matching `fd` |
 | `[picker] max_results` | Caps how many results the picker lists at once, without limiting what can be found by typing |
+| `[picker] external_command` | Runs this via `$SHELL -i -c` instead of the built-in picker, e.g. to delegate to a personal `fzf`-based shell function |
 | Picker rooting | Pressing `p` roots the picker at the directory mdviewer was launched from, rather than the open file's folder |
 | Picker key fix | `p` and `q` are literal search characters in the picker; previously they closed it — or quit outright — so no query containing them could be typed |
+| Picker query reset | The picker's search text no longer persists across close/reopen — previously it kept whatever was last typed |
 | Config lookup | Searches `$XDG_CONFIG_HOME`, then `~/.config`, then the platform directory, so the documented `~/.config/…/config.toml` works on macOS too (see [mdterm#66](https://github.com/bahdotsh/mdterm/issues/66)) |
 
 Nothing here is upstreamed yet. If any of it is useful to the original project, it should go
@@ -162,6 +164,9 @@ When launched without file arguments, mdviewer opens a file picker rooted at the
 | `F5` | Refresh file list |
 | `Esc` | Close picker after a file is open |
 
+Set `[picker] external_command` to shell out to something else entirely instead — see
+[Using an external picker command](#using-an-external-picker-command).
+
 ### Slide Mode (`--slides`)
 
 | Key | Action |
@@ -216,6 +221,7 @@ code_languages = ["dataviewjs", "dataview"]  # fenced languages to drop entirely
 ignore = ["attachments", "Templates"]  # skip these file/directory names
 hidden = false                         # false = skip dot-dirs (.obsidian, .git, .trash)
 max_results = 0                        # cap the list length; 0 = limited only by terminal height
+# external_command = "p"               # if set, `p` runs this instead of the built-in picker
 ```
 
 ### Verifying it is being read
@@ -256,6 +262,25 @@ skips any file with that name. Matching is case-insensitive.
 
 Dot-directories are skipped by default, the same as `fd`, which keeps `.obsidian/`, `.git/`
 and `.trash/` out of the picker. Set `hidden = true` to include them.
+
+### Using an external picker command
+
+The built-in picker is a self-contained fuzzy finder — it doesn't read `.gitignore`/`.ignore`
+files, doesn't sort by modification time, and knows nothing about your shell's `fzf` setup.
+If you already have a `fzf`-based file picker wired up in your shell (e.g. a `p()` function
+bound to a key), `[picker] external_command` delegates to it instead:
+
+```toml
+[picker]
+external_command = "p"
+```
+
+Pressing `p` then suspends mdviewer's TUI, runs the command via `$SHELL -i -c "<command>"` with
+its working directory set to the picker's root (so it searches the same place your shell would),
+and resumes once it exits. The `-i` flag means an interactive shell runs it, so shell functions
+and rc-file-defined aliases resolve — not just binaries on `PATH`. mdviewer doesn't inspect the
+command's output or exit status; whatever it does (open a file, open a nested mdviewer, cancel)
+is between you and your shell, exactly as if you'd run it from a plain terminal.
 
 ### Limiting how many results are listed
 

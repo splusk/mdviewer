@@ -32,6 +32,11 @@ pub struct PickerConfig {
     /// matched against the query, so anything can be found by typing.
     #[serde(default)]
     pub max_results: usize,
+    /// If set, `p` runs this via `$SHELL -i -c "<command>"` (cwd = the picker's
+    /// root) instead of opening the built-in picker, e.g. to delegate to a
+    /// personal `fzf`-based shell function.
+    #[serde(default)]
+    pub external_command: Option<String>,
 }
 
 impl PickerConfig {
@@ -199,6 +204,7 @@ mod tests {
             ignore: ignore.iter().map(|s| s.to_string()).collect(),
             hidden,
             max_results: 0,
+            external_command: None,
         }
     }
 
