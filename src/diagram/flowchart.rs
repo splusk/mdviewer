@@ -650,8 +650,8 @@ mod tests {
     #[test]
     fn renders_simple_top_down_flowchart() {
         let theme = Theme::dark();
-        let (rows, width) =
-            render_flowchart("graph TD\nA[Start] --> B[End]", &theme).expect("flowchart should render");
+        let (rows, width) = render_flowchart("graph TD\nA[Start] --> B[End]", &theme)
+            .expect("flowchart should render");
         let text = flatten(&rows);
         assert!(text.contains("Start"), "expected 'Start' node in:\n{text}");
         assert!(text.contains("End"), "expected 'End' node in:\n{text}");
@@ -672,12 +672,15 @@ mod tests {
     #[test]
     fn renders_diamond_and_circle_shapes() {
         let theme = Theme::dark();
-        let (rows, _width) =
-            render_flowchart("graph TD\nA{Decision} --> B((Circle))", &theme).expect("should render");
+        let (rows, _width) = render_flowchart("graph TD\nA{Decision} --> B((Circle))", &theme)
+            .expect("should render");
         let text = flatten(&rows);
         assert!(text.contains("Decision"));
         assert!(text.contains("Circle"));
-        assert!(text.contains('◆'), "diamond shape should use ◆ border chars");
+        assert!(
+            text.contains('◆'),
+            "diamond shape should use ◆ border chars"
+        );
     }
 
     #[test]

@@ -538,15 +538,21 @@ mod tests {
             .iter()
             .flat_map(|row| row.iter().map(|s| s.text.as_str()))
             .collect();
-        assert!(text.contains('A'), "expected participant A's box in:\n{text}");
-        assert!(text.contains('B'), "expected participant B's box in:\n{text}");
+        assert!(
+            text.contains('A'),
+            "expected participant A's box in:\n{text}"
+        );
+        assert!(
+            text.contains('B'),
+            "expected participant B's box in:\n{text}"
+        );
     }
 
     #[test]
     fn dispatches_graph_header_to_the_flowchart_renderer() {
         let theme = Theme::dark();
-        let (rows, _width) =
-            render_mermaid("graph TD\nA[Start] --> B[End]", &theme).expect("graph header should still render");
+        let (rows, _width) = render_mermaid("graph TD\nA[Start] --> B[End]", &theme)
+            .expect("graph header should still render");
         let text: String = rows
             .iter()
             .flat_map(|row| row.iter().map(|s| s.text.as_str()))

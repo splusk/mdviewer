@@ -94,11 +94,17 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
             continue;
         }
         if let Some(rest) = line.strip_prefix("activate ") {
-            event_stack.last_mut().unwrap().push(Event::Activate(rest.trim().to_string()));
+            event_stack
+                .last_mut()
+                .unwrap()
+                .push(Event::Activate(rest.trim().to_string()));
             continue;
         }
         if let Some(rest) = line.strip_prefix("deactivate ") {
-            event_stack.last_mut().unwrap().push(Event::Deactivate(rest.trim().to_string()));
+            event_stack
+                .last_mut()
+                .unwrap()
+                .push(Event::Deactivate(rest.trim().to_string()));
             continue;
         }
         if let Some(rest) = line.strip_prefix("Note ") {
@@ -123,7 +129,10 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
                 format!("{keyword} {rest}")
             };
             block_stack.push(Block {
-                sections: vec![BlockSection { label, events: Vec::new() }],
+                sections: vec![BlockSection {
+                    label,
+                    events: Vec::new(),
+                }],
             });
             event_stack.push(Vec::new());
             continue;
@@ -131,7 +140,11 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
 
         if let Some(rest) = keyword_rest(line, "else").or_else(|| keyword_rest(line, "and")) {
             if let Some(block) = block_stack.last_mut() {
-                let keyword = if line.starts_with("else") { "else" } else { "and" };
+                let keyword = if line.starts_with("else") {
+                    "else"
+                } else {
+                    "and"
+                };
                 let label = if rest.is_empty() {
                     keyword.to_string()
                 } else {
@@ -139,7 +152,10 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
                 };
                 let closed_events = event_stack.pop().unwrap();
                 block.sections.last_mut().unwrap().events = closed_events;
-                block.sections.push(BlockSection { label, events: Vec::new() });
+                block.sections.push(BlockSection {
+                    label,
+                    events: Vec::new(),
+                });
                 event_stack.push(Vec::new());
             }
             continue;
@@ -159,15 +175,18 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
         {
             register_participant(&from_id, &mut participants);
             register_participant(&to_id, &mut participants);
-            event_stack.last_mut().unwrap().push(Event::Message(Message {
-                from: from_id,
-                to: to_id,
-                text,
-                line: style,
-                end,
-                activate,
-                deactivate,
-            }));
+            event_stack
+                .last_mut()
+                .unwrap()
+                .push(Event::Message(Message {
+                    from: from_id,
+                    to: to_id,
+                    text,
+                    line: style,
+                    end,
+                    activate,
+                    deactivate,
+                }));
         }
         // Anything else (blank/malformed/unrecognized directives like
         // `autonumber`/`title`) is silently skipped — never fall through to
@@ -233,7 +252,10 @@ fn parse_note(rest: &str) -> Option<Note> {
         return None;
     };
 
-    Some(Note { target: note_target, text })
+    Some(Note {
+        target: note_target,
+        text,
+    })
 }
 
 pub(crate) fn note_participant_ids(target: &NoteTarget) -> Vec<String> {
@@ -251,7 +273,14 @@ fn split_message_text(line: &str) -> Option<(&str, Option<String>)> {
     match line.split_once(':') {
         Some((spec, text)) => {
             let text = text.trim();
-            Some((spec.trim(), if text.is_empty() { None } else { Some(text.to_string()) }))
+            Some((
+                spec.trim(),
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text.to_string())
+                },
+            ))
         }
         None => Some((line.trim(), None)),
     }
@@ -370,7 +399,12 @@ fn build_columns(participants: &[Participant]) -> Vec<Column> {
             let width = box_width(&p.label);
             let center_x = x + width / 2;
             x += width + COLUMN_GAP;
-            Column { id: p.id.clone(), label: p.label.clone(), center_x, width }
+            Column {
+                id: p.id.clone(),
+                label: p.label.clone(),
+                center_x,
+                width,
+            }
         })
         .collect()
 }
@@ -539,7 +573,12 @@ fn layout_events(
                 let box_w = min_box_w.max(mid_end.saturating_sub(mid_start) + 4);
                 let (x_start, x_end) = center_span(mid_start, mid_end, box_w);
                 let top_y = *cursor;
-                positioned.push(Positioned::Note { x_start, x_end, top_y, text: n.text.clone() });
+                positioned.push(Positioned::Note {
+                    x_start,
+                    x_end,
+                    top_y,
+                    text: n.text.clone(),
+                });
                 *max_x = (*max_x).max(x_end + 2);
                 *cursor = top_y + 3;
             }
@@ -565,7 +604,13 @@ fn layout_events(
                     );
                     let _ = i;
                 }
-                positioned.push(Positioned::Border { x_start, x_end, y: *cursor, label: None, top: false });
+                positioned.push(Positioned::Border {
+                    x_start,
+                    x_end,
+                    y: *cursor,
+                    label: None,
+                    top: false,
+                });
                 *cursor += 1;
                 *max_x = (*max_x).max(x_end + 2);
             }
@@ -578,8 +623,12 @@ pub(crate) fn layout(diagram: &SequenceDiagram) -> Layout {
     let mut cursor = 3; // rows 0..3 hold the participant boxes
     let mut positioned = Vec::new();
     let mut active_spans = Vec::new();
-    let mut active_since: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let mut max_x = columns.last().map(|c| c.center_x + c.width / 2).unwrap_or(10);
+    let mut active_since: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut max_x = columns
+        .last()
+        .map(|c| c.center_x + c.width / 2)
+        .unwrap_or(10);
 
     layout_events(
         &diagram.events,
@@ -671,13 +720,35 @@ fn render_positioned(
     columns: &[Column],
 ) {
     match item {
-        Positioned::Message { from_x, to_x, label_y, arrow_y, text, line, end } => {
+        Positioned::Message {
+            from_x,
+            to_x,
+            label_y,
+            arrow_y,
+            text,
+            line,
+            end,
+        } => {
             if let Some(text) = text {
-                draw_centered(canvas, (*from_x).min(*to_x), (*from_x).max(*to_x), *label_y, text, text_fg);
+                draw_centered(
+                    canvas,
+                    (*from_x).min(*to_x),
+                    (*from_x).max(*to_x),
+                    *label_y,
+                    text,
+                    text_fg,
+                );
             }
             draw_h_line(canvas, *from_x, *to_x, *arrow_y, *line, *end, border_fg);
         }
-        Positioned::SelfMessage { x, top_y, label_y, bottom_y, text, end } => {
+        Positioned::SelfMessage {
+            x,
+            top_y,
+            label_y,
+            bottom_y,
+            text,
+            end,
+        } => {
             canvas.set(x + 1, *top_y, '─', border_fg);
             canvas.set(x + 2, *top_y, '╮', border_fg);
             canvas.set(x + 2, *label_y, '│', border_fg);
@@ -688,10 +759,19 @@ fn render_positioned(
             }
             canvas.set(x + 2, *bottom_y, '╯', border_fg);
             canvas.set(x + 1, *bottom_y, '─', border_fg);
-            let arrow = if *end == ArrowEnd::Cross { '✗' } else { '◀' };
+            let arrow = if *end == ArrowEnd::Cross {
+                '✗'
+            } else {
+                '◀'
+            };
             canvas.set(*x, *bottom_y, arrow, border_fg);
         }
-        Positioned::Note { x_start, x_end, top_y, text } => {
+        Positioned::Note {
+            x_start,
+            x_end,
+            top_y,
+            text,
+        } => {
             let width = x_end.saturating_sub(*x_start).max(4);
             canvas.draw_node(
                 (x_start + x_end) / 2,
@@ -703,7 +783,13 @@ fn render_positioned(
                 text_fg,
             );
         }
-        Positioned::Border { x_start, x_end, y, label, top } => {
+        Positioned::Border {
+            x_start,
+            x_end,
+            y,
+            label,
+            top,
+        } => {
             canvas.set(*x_start, *y, if *top { '┌' } else { '└' }, border_fg);
             canvas.set(*x_end, *y, if *top { '┐' } else { '┘' }, border_fg);
             for x in (x_start + 1)..*x_end {
@@ -734,8 +820,16 @@ fn draw_h_line(
     end: ArrowEnd,
     fg: Option<Color>,
 ) {
-    let (left, right, forward) = if from_x <= to_x { (from_x, to_x, true) } else { (to_x, from_x, false) };
-    let ch = if line == LineStyle::Dashed { '┄' } else { '─' };
+    let (left, right, forward) = if from_x <= to_x {
+        (from_x, to_x, true)
+    } else {
+        (to_x, from_x, false)
+    };
+    let ch = if line == LineStyle::Dashed {
+        '┄'
+    } else {
+        '─'
+    };
     for x in (left + 1)..right {
         canvas.set(x, y, ch, fg);
     }
@@ -785,8 +879,14 @@ mod tests {
         assert_eq!(
             d.participants,
             vec![
-                Participant { id: "A".to_string(), label: "Alice".to_string() },
-                Participant { id: "B".to_string(), label: "B".to_string() },
+                Participant {
+                    id: "A".to_string(),
+                    label: "Alice".to_string()
+                },
+                Participant {
+                    id: "B".to_string(),
+                    label: "B".to_string()
+                },
             ]
         );
     }
@@ -794,7 +894,13 @@ mod tests {
     #[test]
     fn actor_keyword_registers_a_participant() {
         let d = parse_sequence("sequenceDiagram\nactor U as User\n").expect("should parse");
-        assert_eq!(d.participants, vec![Participant { id: "U".to_string(), label: "User".to_string() }]);
+        assert_eq!(
+            d.participants,
+            vec![Participant {
+                id: "U".to_string(),
+                label: "User".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -803,8 +909,14 @@ mod tests {
         assert_eq!(
             d.participants,
             vec![
-                Participant { id: "B".to_string(), label: "B".to_string() },
-                Participant { id: "A".to_string(), label: "A".to_string() },
+                Participant {
+                    id: "B".to_string(),
+                    label: "B".to_string()
+                },
+                Participant {
+                    id: "A".to_string(),
+                    label: "A".to_string()
+                },
             ]
         );
     }
@@ -865,7 +977,8 @@ mod tests {
 
     #[test]
     fn activation_shorthand_on_arrow_sets_activate_and_deactivate() {
-        let d = parse_sequence("sequenceDiagram\nA->>+B: go\nB-->>-A: done\n").expect("should parse");
+        let d =
+            parse_sequence("sequenceDiagram\nA->>+B: go\nB-->>-A: done\n").expect("should parse");
         match &d.events[0] {
             Event::Message(m) => {
                 assert!(m.activate);
@@ -910,7 +1023,10 @@ mod tests {
             .expect("should parse");
         match &d.events[1] {
             Event::Note(n) => {
-                assert_eq!(n.target, NoteTarget::Over("A".to_string(), Some("B".to_string())));
+                assert_eq!(
+                    n.target,
+                    NoteTarget::Over("A".to_string(), Some("B".to_string()))
+                );
                 assert_eq!(n.text, "they meet");
             }
             _ => panic!("expected a note"),
@@ -936,7 +1052,13 @@ mod tests {
     #[test]
     fn note_over_a_single_participant_registers_it_even_if_unreferenced_elsewhere() {
         let d = parse_sequence("sequenceDiagram\nNote over A: alone\n").expect("should parse");
-        assert_eq!(d.participants, vec![Participant { id: "A".to_string(), label: "A".to_string() }]);
+        assert_eq!(
+            d.participants,
+            vec![Participant {
+                id: "A".to_string(),
+                label: "A".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -975,10 +1097,9 @@ mod tests {
 
     #[test]
     fn parses_par_with_and_divider() {
-        let d = parse_sequence(
-            "sequenceDiagram\npar fetch A\nX->>Y: a\nand fetch B\nX->>Y: b\nend\n",
-        )
-        .expect("should parse");
+        let d =
+            parse_sequence("sequenceDiagram\npar fetch A\nX->>Y: a\nand fetch B\nX->>Y: b\nend\n")
+                .expect("should parse");
         let block = match &d.events[0] {
             Event::Block(b) => b,
             _ => panic!("expected a block"),
@@ -1034,13 +1155,22 @@ mod tests {
             .positioned
             .iter()
             .filter_map(|p| match p {
-                Positioned::Message { label_y, arrow_y, .. } => Some((*label_y, *arrow_y)),
+                Positioned::Message {
+                    label_y, arrow_y, ..
+                } => Some((*label_y, *arrow_y)),
                 _ => None,
             })
             .collect();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].1, rows[0].0 + 1, "arrow row is directly below the label row");
-        assert!(rows[1].0 > rows[0].1, "second message starts after the first one's arrow row");
+        assert_eq!(
+            rows[0].1,
+            rows[0].0 + 1,
+            "arrow row is directly below the label row"
+        );
+        assert!(
+            rows[1].0 > rows[0].1,
+            "second message starts after the first one's arrow row"
+        );
     }
 
     #[test]
@@ -1048,7 +1178,12 @@ mod tests {
         let d = parse_sequence("sequenceDiagram\nA->>A: think\n").expect("should parse");
         let l = layout(&d);
         match &l.positioned[0] {
-            Positioned::SelfMessage { top_y, label_y, bottom_y, .. } => {
+            Positioned::SelfMessage {
+                top_y,
+                label_y,
+                bottom_y,
+                ..
+            } => {
                 assert_eq!(*label_y, *top_y + 1);
                 assert_eq!(*bottom_y, *top_y + 2);
             }
@@ -1063,7 +1198,12 @@ mod tests {
         let l = layout(&d);
         let ax = column_x(&l, "A");
         let bx = column_x(&l, "B");
-        match l.positioned.iter().find(|p| matches!(p, Positioned::Note { .. })).unwrap() {
+        match l
+            .positioned
+            .iter()
+            .find(|p| matches!(p, Positioned::Note { .. }))
+            .unwrap()
+        {
             Positioned::Note { x_start, x_end, .. } => {
                 assert!(*x_start <= ax.min(bx));
                 assert!(*x_end >= ax.max(bx));
@@ -1083,14 +1223,24 @@ mod tests {
         let bx = column_x(&l, "B");
         let cx = column_x(&l, "C");
 
-        let borders: Vec<&Positioned> =
-            l.positioned.iter().filter(|p| matches!(p, Positioned::Border { .. })).collect();
-        assert_eq!(borders.len(), 2, "one top + one bottom border for a single-section loop");
+        let borders: Vec<&Positioned> = l
+            .positioned
+            .iter()
+            .filter(|p| matches!(p, Positioned::Border { .. }))
+            .collect();
+        assert_eq!(
+            borders.len(),
+            2,
+            "one top + one bottom border for a single-section loop"
+        );
         match borders[0] {
             Positioned::Border { x_start, x_end, .. } => {
                 assert!(*x_start <= ax.min(bx));
                 assert!(*x_end >= ax.max(bx));
-                assert!(*x_end < cx, "block must not extend to C, which it never references");
+                assert!(
+                    *x_end < cx,
+                    "block must not extend to C, which it never references"
+                );
             }
             _ => unreachable!(),
         }
@@ -1098,13 +1248,15 @@ mod tests {
 
     #[test]
     fn nested_alt_else_produces_top_divider_and_bottom_borders() {
-        let d = parse_sequence(
-            "sequenceDiagram\nalt happy\nA->>B: ok\nelse sad\nA->>B: retry\nend\n",
-        )
-        .expect("should parse");
+        let d =
+            parse_sequence("sequenceDiagram\nalt happy\nA->>B: ok\nelse sad\nA->>B: retry\nend\n")
+                .expect("should parse");
         let l = layout(&d);
-        let borders: Vec<&Positioned> =
-            l.positioned.iter().filter(|p| matches!(p, Positioned::Border { .. })).collect();
+        let borders: Vec<&Positioned> = l
+            .positioned
+            .iter()
+            .filter(|p| matches!(p, Positioned::Border { .. }))
+            .collect();
         // top border ("alt happy"), divider ("else sad"), bottom border.
         assert_eq!(borders.len(), 3);
     }
@@ -1150,11 +1302,23 @@ mod tests {
                      Note over A,B: they are friends\n";
         let (rows, width) = render_sequence(code, &theme).expect("should render");
         let text = flatten(&rows);
-        assert!(text.contains("Alice"), "expected participant label in:\n{text}");
-        assert!(text.contains("Bob"), "expected participant label in:\n{text}");
+        assert!(
+            text.contains("Alice"),
+            "expected participant label in:\n{text}"
+        );
+        assert!(
+            text.contains("Bob"),
+            "expected participant label in:\n{text}"
+        );
         assert!(text.contains("hello"), "expected message text in:\n{text}");
-        assert!(text.contains("hi back"), "expected message text in:\n{text}");
-        assert!(text.contains("they are friends"), "expected note text in:\n{text}");
+        assert!(
+            text.contains("hi back"),
+            "expected message text in:\n{text}"
+        );
+        assert!(
+            text.contains("they are friends"),
+            "expected note text in:\n{text}"
+        );
         assert!(text.contains('▶'), "expected a solid arrowhead for ->>");
         assert!(width > 0);
     }
@@ -1165,7 +1329,10 @@ mod tests {
         let code = "sequenceDiagram\nA->>B: hi\nloop Every request\nA->>B: poll\nend\n";
         let (rows, _width) = render_sequence(code, &theme).expect("should render");
         let text = flatten(&rows);
-        assert!(text.contains("loop Every request"), "expected loop label in:\n{text}");
+        assert!(
+            text.contains("loop Every request"),
+            "expected loop label in:\n{text}"
+        );
     }
 
     #[test]
