@@ -1133,3 +1133,67 @@ pub fn render_mermaid(code: &str, theme: &Theme) -> Option<(Vec<Vec<StyledSpan>>
         Direction::LeftRight => render_lr(&graph, theme),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::Theme;
+
+    fn flatten(rows: &[Vec<StyledSpan>]) -> String {
+        rows.iter()
+            .map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn renders_simple_top_down_flowchart() {
+        let theme = Theme::dark();
+        let (rows, width) =
+            render_mermaid("graph TD\nA[Start] --> B[End]", &theme).expect("flowchart should render");
+        let text = flatten(&rows);
+        assert!(text.contains("Start"), "expected 'Start' node in:\n{text}");
+        assert!(text.contains("End"), "expected 'End' node in:\n{text}");
+        assert!(width > 0);
+    }
+
+    #[test]
+    fn renders_left_right_flowchart_with_edge_label() {
+        let theme = Theme::dark();
+        let (rows, _width) = render_mermaid("graph LR\nA[One] -- go --> B[Two]", &theme)
+            .expect("flowchart should render");
+        let text = flatten(&rows);
+        assert!(text.contains("One"), "expected 'One' node in:\n{text}");
+        assert!(text.contains("Two"), "expected 'Two' node in:\n{text}");
+        assert!(text.contains("go"), "expected edge label 'go' in:\n{text}");
+    }
+
+    #[test]
+    fn renders_diamond_and_circle_shapes() {
+        let theme = Theme::dark();
+        let (rows, _width) =
+            render_mermaid("graph TD\nA{Decision} --> B((Circle))", &theme).expect("should render");
+        let text = flatten(&rows);
+        assert!(text.contains("Decision"));
+        assert!(text.contains("Circle"));
+        assert!(text.contains('◆'), "diamond shape should use ◆ border chars");
+    }
+
+    #[test]
+    fn unparseable_input_returns_none() {
+        // The flowchart parser is lenient: any line starting with an
+        // alphanumeric/underscore/hyphen char is treated as a node id, so
+        // plain prose (e.g. "not a mermaid diagram at all") actually parses
+        // as a one-node graph rather than returning None. Use input whose
+        // every line fails `parse_node_ref` (starts with punctuation) to
+        // exercise the real None path.
+        let theme = Theme::dark();
+        assert!(render_mermaid("!!! definitely not mermaid !!!", &theme).is_none());
+    }
+
+    #[test]
+    fn empty_code_block_returns_none() {
+        let theme = Theme::dark();
+        assert!(render_mermaid("", &theme).is_none());
+    }
+}
