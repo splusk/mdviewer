@@ -492,7 +492,22 @@ fn layout_events(
                         line: m.line,
                         end: m.end,
                     });
-                    *max_x = (*max_x).max(from_x.max(to_x) + 2);
+                    // Widen for the label text too: draw_centered starts the label at
+                    // `mid.saturating_sub(len / 2)`, so for a label longer than twice
+                    // `mid` that start clamps to 0 and the text's right edge (start +
+                    // len) can extend well past max(from_x, to_x) — mirroring the
+                    // saturating_sub in draw_centered exactly rather than assuming it
+                    // never clamps.
+                    let mid = (from_x.min(to_x) + from_x.max(to_x)) / 2;
+                    let label_extent = m
+                        .text
+                        .as_deref()
+                        .map(|t| {
+                            let len = t.chars().count();
+                            mid.saturating_sub(len / 2) + len
+                        })
+                        .unwrap_or(0);
+                    *max_x = (*max_x).max(from_x.max(to_x).max(label_extent) + 2);
                     *cursor = arrow_y + 1;
                 }
 
