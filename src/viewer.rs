@@ -524,6 +524,47 @@ impl ViewerState {
         }
     }
 
+    /// Returns the match index of the file-picker entry rendered at the given
+    /// terminal (row, col), if any. Mirrors the box geometry computed in
+    /// `render_file_picker_overlay` so a click maps back to the same row it
+    /// was drawn on.
+    fn file_picker_match_idx_at_row(&self, term_row: usize, term_col: usize) -> Option<usize> {
+        let picker = self.file_picker.as_ref()?;
+        let width = self.cols as usize;
+        let viewport = self.viewport();
+        if width < 24 || viewport < 5 {
+            return None;
+        }
+
+        let total = picker.match_count();
+        if total == 0 {
+            return None;
+        }
+        let visible = total.min(self.file_picker_visible_entries());
+        let box_w = (width * 4 / 5).max(42).min(width.saturating_sub(4));
+        let box_h = visible + 4;
+        let x_off = width.saturating_sub(box_w) / 2;
+        let y_off = viewport.saturating_sub(box_h) / 2 + 1;
+
+        if term_col < x_off || term_col >= x_off + box_w {
+            return None;
+        }
+        let entries_top = y_off + 3;
+        if term_row < entries_top {
+            return None;
+        }
+        let row = term_row - entries_top;
+        if row >= visible {
+            return None;
+        }
+        let match_idx = picker.scroll + row;
+        if match_idx < total {
+            Some(match_idx)
+        } else {
+            None
+        }
+    }
+
     fn has_current_file(&self) -> bool {
         !self.files.is_empty()
             && self.current_file_idx < self.files.len()
@@ -1399,6 +1440,26 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
                     }
                 }
             }
+            MouseEventKind::Down(MouseButton::Left) if state.mode == ViewMode::FilePicker => {
+                if let Some(match_idx) =
+                    state.file_picker_match_idx_at_row(me.row as usize, me.column as usize)
+                {
+                    let visible = state.file_picker_visible_entries();
+                    let path = state.file_picker.as_mut().and_then(|picker| {
+                        picker.selected = match_idx;
+                        picker.keep_selection_visible(visible);
+                        picker.entry_at_match(match_idx).map(|e| e.path.clone())
+                    });
+                    if let Some(path) = path {
+                        let full = path.canonicalize().unwrap_or(path);
+                        let path_str = full.to_string_lossy().to_string();
+                        if copy_to_clipboard(&path_str).is_ok() {
+                            state.set_toast(format!("Copied path: {}", path_str));
+                        }
+                    }
+                    state.dirty = true;
+                }
+            }
             MouseEventKind::Moved if state.mode == ViewMode::Normal => {
                 let on_link = state
                     .link_at_position(me.row as usize, me.column as usize)
@@ -1810,9 +1871,9 @@ fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> 
             state.line_numbers = !state.line_numbers;
             state.rebuild();
             state.set_toast(if state.line_numbers {
-                "Line numbers ON"
+                "Line numbers ON (code blocks)"
             } else {
-                "Line numbers OFF"
+                "Line numbers OFF (code blocks)"
             });
         }
 
@@ -1900,6 +1961,19 @@ fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> 
             let text = state.full_text();
             if copy_to_clipboard(&text).is_ok() {
                 state.set_toast("Document copied");
+            }
+        }
+
+        // Copy full file path
+        KeyCode::Char('P') => {
+            if let Some(path) = state.current_file_path() {
+                let full = path.canonicalize().unwrap_or(path);
+                let path_str = full.to_string_lossy().to_string();
+                if copy_to_clipboard(&path_str).is_ok() {
+                    state.set_toast(format!("Copied path: {}", path_str));
+                }
+            } else {
+                state.set_toast("No file path to copy");
             }
         }
 
@@ -4233,9 +4307,10 @@ pub(crate) fn help_sections() -> &'static [HelpSection] {
             entries: &[
                 ("click", "Copy heading section, list, or code block"),
                 ("Y", "Copy full document to clipboard"),
+                ("P", "Copy full file path to clipboard"),
                 ("c", "Copy nearest code block"),
                 ("t", "Toggle dark / light theme"),
-                ("l", "Toggle line numbers"),
+                ("l", "Toggle line numbers in code blocks"),
                 ("m", "Toggle mouse capture (for text select)"),
             ],
         },
@@ -5024,6 +5099,59 @@ mod tests {
         assert_eq!(state.link_at_position(1, 2 + 2), None); // space
         assert_eq!(state.link_at_position(1, 2 + 3), Some("https://b.com"));
         assert_eq!(state.link_at_position(1, 2 + 4), Some("https://b.com"));
+    }
+
+    // ── file_picker_match_idx_at_row tests ──────────────────────────────────
+
+    fn make_file_picker_state(files: &[&str]) -> ViewerState {
+        let root = wikilink_temp_root("mdviewer-picker-hittest");
+        std::fs::create_dir_all(&root).unwrap();
+        for name in files {
+            std::fs::write(root.join(name), "# content").unwrap();
+        }
+        let mut state = make_state_with_lines(vec![]);
+        state.cols = 80;
+        state.rows = 24;
+        state.file_picker = Some(crate::file_picker::FilePickerState::new(
+            &root,
+            PickerConfig::default(),
+        ));
+        state.mode = ViewMode::FilePicker;
+        state
+    }
+
+    #[test]
+    fn file_picker_match_idx_at_row_hits_each_visible_row() {
+        let state = make_file_picker_state(&["a.md", "b.md", "c.md"]);
+        // width=80, viewport=22 -> box_w=64, x_off=8; box_h=7, y_off=8 -> entries start at row 11.
+        assert_eq!(state.file_picker_match_idx_at_row(11, 10), Some(0));
+        assert_eq!(state.file_picker_match_idx_at_row(12, 10), Some(1));
+        assert_eq!(state.file_picker_match_idx_at_row(13, 10), Some(2));
+        std::fs::remove_dir_all(&state.file_picker.as_ref().unwrap().root).unwrap();
+    }
+
+    #[test]
+    fn file_picker_match_idx_at_row_misses_outside_entry_rows() {
+        let state = make_file_picker_state(&["a.md", "b.md", "c.md"]);
+        assert_eq!(state.file_picker_match_idx_at_row(10, 10), None); // above the list (title/search/separator)
+        assert_eq!(state.file_picker_match_idx_at_row(14, 10), None); // past the last entry
+        std::fs::remove_dir_all(&state.file_picker.as_ref().unwrap().root).unwrap();
+    }
+
+    #[test]
+    fn file_picker_match_idx_at_row_misses_outside_box_columns() {
+        let state = make_file_picker_state(&["a.md", "b.md", "c.md"]);
+        assert_eq!(state.file_picker_match_idx_at_row(11, 7), None); // left of the box
+        assert_eq!(state.file_picker_match_idx_at_row(11, 72), None); // right of the box
+        std::fs::remove_dir_all(&state.file_picker.as_ref().unwrap().root).unwrap();
+    }
+
+    #[test]
+    fn file_picker_match_idx_at_row_none_without_picker_open() {
+        let mut state = make_state_with_lines(vec![]);
+        state.cols = 80;
+        state.rows = 24;
+        assert_eq!(state.file_picker_match_idx_at_row(11, 10), None);
     }
 
     // ── wikilink navigation tests ───────────────────────────────────────────
