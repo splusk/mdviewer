@@ -508,17 +508,35 @@ impl Canvas {
     }
 }
 
+/// Consumes leading blank lines, `%%` comments, and a single leading YAML
+/// frontmatter block (a `---` line, any number of lines, then another `---`
+/// line) from `lines`, then returns the next line — the diagram's header —
+/// leaving `lines` positioned right after it.
+pub(crate) fn next_header_line<'a, I: Iterator<Item = &'a str>>(lines: &mut I) -> Option<&'a str> {
+    while let Some(line) = lines.next() {
+        if line.is_empty() || line.starts_with("%%") {
+            continue;
+        }
+        if line == "---" {
+            for l in lines.by_ref() {
+                if l == "---" {
+                    break;
+                }
+            }
+            continue;
+        }
+        return Some(line);
+    }
+    None
+}
+
 // ───── Public API ─────
 
 /// Try to render mermaid code as a visual diagram.
 /// Returns (content_rows, content_width) or None if parsing fails.
 pub fn render_mermaid(code: &str, theme: &Theme) -> Option<(Vec<Vec<StyledSpan>>, usize)> {
-    let first_line = code
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("%%"));
-
-    if first_line == Some("sequenceDiagram") {
+    let mut lines = code.lines().map(str::trim);
+    if next_header_line(&mut lines) == Some("sequenceDiagram") {
         return sequence::render_sequence(code, theme);
     }
     flowchart::render_flowchart(code, theme)

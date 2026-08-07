@@ -71,7 +71,7 @@ pub(crate) struct SequenceDiagram {
 
 pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
     let mut lines = code.lines().map(str::trim);
-    let header = lines.find(|l| !l.is_empty() && !l.starts_with("%%"));
+    let header = super::next_header_line(&mut lines);
     if header != Some("sequenceDiagram") {
         return None;
     }
@@ -121,6 +121,9 @@ pub(crate) fn parse_sequence(code: &str) -> Option<SequenceDiagram> {
             .or_else(|| keyword_rest(line, "alt"))
             .or_else(|| keyword_rest(line, "opt"))
             .or_else(|| keyword_rest(line, "par"))
+            .or_else(|| keyword_rest(line, "rect"))
+            .or_else(|| keyword_rest(line, "critical"))
+            .or_else(|| keyword_rest(line, "break"))
         {
             let keyword = line.split_whitespace().next().unwrap_or(line);
             let label = if rest.is_empty() {
@@ -480,7 +483,16 @@ fn block_span(sections: &[BlockSection], columns: &[Column]) -> (usize, usize) {
         min_x = columns.first().map(|c| c.center_x).unwrap_or(0);
         max_x = columns.last().map(|c| c.center_x).unwrap_or(0);
     }
-    (min_x.saturating_sub(BLOCK_MARGIN), max_x + BLOCK_MARGIN)
+    let x_start = min_x.saturating_sub(BLOCK_MARGIN);
+    let mut x_end = max_x + BLOCK_MARGIN;
+    // The participant-derived span is a floor: widen further (never
+    // narrower) so every section's label fits with its " {label} " padding,
+    // which render_positioned's Border arm paints starting at `x_start + 1`.
+    for section in sections {
+        let label_end = x_start + 1 + section.label.chars().count() + 2;
+        x_end = x_end.max(label_end);
+    }
+    (x_start, x_end)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,7 +523,17 @@ fn layout_events(
                         text: m.text.clone(),
                         end: m.end,
                     });
-                    *max_x = (*max_x).max(from_x + 8);
+                    // Mirrors the SelfMessage render arm, which paints the
+                    // label starting at `x + 4 + i` per character — so the
+                    // true right-edge extent is `from_x + 4 + len`, not a
+                    // flat constant (same class of bug as the two-party
+                    // label-widening below).
+                    let label_extent = m
+                        .text
+                        .as_deref()
+                        .map(|t| from_x + 4 + t.chars().count())
+                        .unwrap_or(from_x + 8);
+                    *max_x = (*max_x).max(label_extent);
                     *cursor = bottom_y + 1;
                 } else {
                     let label_y = *cursor;
@@ -1108,6 +1130,68 @@ mod tests {
     }
 
     #[test]
+    fn critical_and_break_blocks_are_recognized_as_block_keywords() {
+        let d = parse_sequence(
+            "sequenceDiagram\ncritical must succeed\nA->>B: try\nend\nbreak on error\nA->>B: abort\nend\n",
+        )
+        .expect("should parse");
+        assert_eq!(d.events.len(), 2);
+        match &d.events[0] {
+            Event::Block(b) => assert_eq!(b.sections[0].label, "critical must succeed"),
+            _ => panic!("expected a critical block"),
+        }
+        match &d.events[1] {
+            Event::Block(b) => assert_eq!(b.sections[0].label, "break on error"),
+            _ => panic!("expected a break block"),
+        }
+    }
+
+    #[test]
+    fn rect_block_inside_loop_does_not_leak_its_end_to_the_parent() {
+        // Regression for a structural corruption bug: `rect` (like
+        // `critical`/`break`) wasn't recognized as a block keyword, so its
+        // own `end` used to close whatever loop/alt/opt/par was open one
+        // level up instead of closing the rect block itself.
+        let d = parse_sequence(
+            "sequenceDiagram\n\
+             loop outer\n\
+             rect rgb(0,0,255)\n\
+             A->>B: inner\n\
+             end\n\
+             A->>B: after rect\n\
+             end\n",
+        )
+        .expect("should parse");
+
+        assert_eq!(d.events.len(), 1);
+        let outer = match &d.events[0] {
+            Event::Block(b) => b,
+            _ => panic!("expected outer block"),
+        };
+        assert_eq!(outer.sections.len(), 1);
+        assert_eq!(outer.sections[0].label, "loop outer");
+        assert_eq!(
+            outer.sections[0].events.len(),
+            2,
+            "outer loop should contain the rect block AND the trailing message, \
+             not have been closed early by the rect's `end`"
+        );
+
+        match &outer.sections[0].events[0] {
+            Event::Block(inner) => {
+                assert_eq!(inner.sections.len(), 1);
+                assert_eq!(inner.sections[0].label, "rect rgb(0,0,255)");
+                assert_eq!(inner.sections[0].events.len(), 1);
+            }
+            _ => panic!("expected a nested rect block"),
+        }
+        match &outer.sections[0].events[1] {
+            Event::Message(m) => assert_eq!(m.text, Some("after rect".to_string())),
+            _ => panic!("expected 'after rect' message still inside the outer loop"),
+        }
+    }
+
+    #[test]
     fn comments_and_unrecognized_directives_are_skipped_without_creating_participants() {
         let d = parse_sequence(
             "sequenceDiagram\n%% a comment\nautonumber\ntitle Some Title\nA->>B: hi\n",
@@ -1120,6 +1204,35 @@ mod tests {
     #[test]
     fn non_sequence_diagram_input_returns_none() {
         assert_eq!(parse_sequence("graph TD\nA-->B\n"), None);
+    }
+
+    #[test]
+    fn parses_sequence_diagram_after_yaml_frontmatter() {
+        // Regression: a leading YAML frontmatter block (documented Mermaid
+        // syntax) used to hide the `sequenceDiagram` header from the
+        // header check, routing the diagram to the flowchart parser instead.
+        let d = parse_sequence("---\ntitle: x\n---\nsequenceDiagram\nA->>B: hi\n")
+            .expect("should parse after skipping frontmatter");
+        assert_eq!(d.participants.len(), 2);
+        assert_eq!(d.events.len(), 1);
+    }
+
+    #[test]
+    fn render_mermaid_dispatches_to_sequence_diagram_after_frontmatter_skip() {
+        // Same regression as above, exercised through the dispatcher in
+        // mod.rs rather than parse_sequence directly: input with frontmatter
+        // must render identically to the same diagram without frontmatter,
+        // proving it was routed to the sequence renderer and not the
+        // flowchart renderer.
+        let theme = crate::theme::Theme::dark();
+        let with_frontmatter = "---\ntitle: x\n---\nsequenceDiagram\nA->>B: hi\n";
+        let without_frontmatter = "sequenceDiagram\nA->>B: hi\n";
+        let (rows_with, width_with) = crate::diagram::render_mermaid(with_frontmatter, &theme)
+            .expect("should render as a sequence diagram, not flowchart garbage");
+        let (rows_without, width_without) =
+            render_sequence(without_frontmatter, &theme).expect("should render");
+        assert_eq!(width_with, width_without);
+        assert_eq!(flatten(&rows_with), flatten(&rows_without));
     }
 
     #[test]
@@ -1331,6 +1444,37 @@ mod tests {
         assert!(
             text.contains("loop Every request"),
             "expected loop label in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn self_message_label_is_not_truncated_by_short_max_x() {
+        // Regression: max_x used to widen by a flat `from_x + 8`, but the
+        // SelfMessage render arm paints the label starting at `x + 4 + i` per
+        // character, so a label longer than 4 chars got clipped by the
+        // canvas's bounds check.
+        let theme = crate::theme::Theme::dark();
+        let code = "sequenceDiagram\nA->>A: validating the incoming request payload\n";
+        let (rows, _width) = render_sequence(code, &theme).expect("should render");
+        let text = flatten(&rows);
+        assert!(
+            text.contains("validating the incoming request payload"),
+            "expected full self-message label in:\n{text}"
+        );
+    }
+
+    #[test]
+    fn long_loop_label_is_not_clipped_by_block_border() {
+        // Regression: block_span only accounted for the participant columns
+        // a block spans, not the width of its section labels, so a long
+        // `loop`/`alt` condition overflowed past x_end and got clipped.
+        let theme = crate::theme::Theme::dark();
+        let code = "sequenceDiagram\nA->>B: hi\nloop retry with exponential backoff until success\nA->>B: poll\nend\n";
+        let (rows, _width) = render_sequence(code, &theme).expect("should render");
+        let text = flatten(&rows);
+        assert!(
+            text.contains("loop retry with exponential backoff until success"),
+            "expected full loop label in:\n{text}"
         );
     }
 
