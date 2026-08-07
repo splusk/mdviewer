@@ -246,10 +246,9 @@ fn parse_note(rest: &str) -> Option<Note> {
         NoteTarget::Over(a, b)
     } else if let Some(name) = target.strip_prefix("left of ") {
         NoteTarget::LeftOf(name.trim().to_string())
-    } else if let Some(name) = target.strip_prefix("right of ") {
-        NoteTarget::RightOf(name.trim().to_string())
     } else {
-        return None;
+        let name = target.strip_prefix("right of ")?;
+        NoteTarget::RightOf(name.trim().to_string())
     };
 
     Some(Note {
