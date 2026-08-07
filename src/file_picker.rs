@@ -1,13 +1,15 @@
 use std::cmp::Ordering;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-use crate::config::PickerConfig;
+use crate::config::{PickerConfig, SortMode};
 
 #[derive(Clone, Debug)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub display: String,
+    pub modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,9 +194,19 @@ impl FilePickerState {
                 .collect();
         }
 
+        let sort_mode = self.picker.sort_mode();
         self.matches.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
+                .then_with(|| match sort_mode {
+                    SortMode::Mtime { descending } => {
+                        let ord = self.entries[a.entry_idx]
+                            .modified
+                            .cmp(&self.entries[b.entry_idx].modified);
+                        if descending { ord.reverse() } else { ord }
+                    }
+                    SortMode::Name => Ordering::Equal,
+                })
                 .then_with(|| {
                     self.entries[a.entry_idx]
                         .display
@@ -294,7 +306,12 @@ fn visit_dir(
                 .strip_prefix(root)
                 .map(display_path)
                 .unwrap_or_else(|_| display_path(&path));
-            entries.push(FileEntry { path, display });
+            let modified = child.metadata().ok().and_then(|m| m.modified().ok());
+            entries.push(FileEntry {
+                path,
+                display,
+                modified,
+            });
         }
     }
     Ok(())
@@ -431,6 +448,7 @@ mod tests {
             ignore: Vec::new(),
             hidden: true,
             max_results: 0,
+            sort_by: None,
         };
         let entries = discover_markdown_files(&root, &show_hidden).unwrap();
         assert_eq!(
@@ -455,10 +473,43 @@ mod tests {
             ignore: vec!["Attachments".to_string(), "skipme.md".to_string()],
             hidden: false,
             max_results: 0,
+            sort_by: None,
         };
         let entries = discover_markdown_files(&root, &cfg).unwrap();
         let displays: Vec<_> = entries.iter().map(|e| e.display.as_str()).collect();
         assert_eq!(displays, vec!["notes/keep.md"]);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sort_by_mtime_desc_orders_newest_first() {
+        let root = temp_root("mdviewer-picker-mtime");
+        fs::create_dir_all(&root).unwrap();
+        let old = root.join("old.md");
+        let new = root.join("new.md");
+        fs::write(&old, "# Old").unwrap();
+        fs::write(&new, "# New").unwrap();
+
+        let old_time = SystemTime::now() - std::time::Duration::from_secs(3600);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+
+        let picker = PickerConfig {
+            sort_by: Some("mtime,desc".to_string()),
+            ..PickerConfig::default()
+        };
+        let state = FilePickerState::new(&root, picker);
+        let displays: Vec<_> = state
+            .visible_entries(10)
+            .iter()
+            .map(|e| e.display.clone())
+            .collect();
+        assert_eq!(displays, vec!["new.md", "old.md"]);
 
         fs::remove_dir_all(root).unwrap();
     }

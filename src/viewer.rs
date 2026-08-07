@@ -531,16 +531,17 @@ impl ViewerState {
     }
 
     fn open_file_picker(&mut self) {
+        // Root at the directory mdviewer was launched from, not the opened
+        // file's parent: `p` should search the same place the shell would,
+        // rather than narrowing to whatever folder the current note lives
+        // in. An explicit directory argument still wins, because that path
+        // builds the picker up front and never reaches here.
+        let root = std::env::current_dir()
+            .ok()
+            .or_else(|| self.current_file_parent())
+            .unwrap_or_else(|| PathBuf::from("."));
+
         if self.file_picker.is_none() {
-            // Root at the directory mdviewer was launched from, not the opened
-            // file's parent: `p` should search the same place the shell would,
-            // rather than narrowing to whatever folder the current note lives
-            // in. An explicit directory argument still wins, because that path
-            // builds the picker up front and never reaches here.
-            let root = std::env::current_dir()
-                .ok()
-                .or_else(|| self.current_file_parent())
-                .unwrap_or_else(|| PathBuf::from("."));
             self.file_picker = Some(crate::file_picker::FilePickerState::new(
                 root,
                 self.picker.clone(),
@@ -605,6 +606,7 @@ impl ViewerState {
         if self.switch_file(target_idx) {
             self.file_picker_can_close = true;
             self.mode = ViewMode::Normal;
+            self.file_picker = None;
             true
         } else {
             false
@@ -2476,6 +2478,7 @@ fn handle_file_picker(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers
         KeyCode::Esc => {
             if state.file_picker_can_close {
                 state.mode = ViewMode::Normal;
+                state.file_picker = None;
                 false
             } else {
                 true

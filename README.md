@@ -28,8 +28,10 @@ vault in the terminal — and adds only the following on top:
 | `[picker] ignore` | Skips files and directories by name in the file picker |
 | `[picker] hidden` | Dot-directories (`.obsidian`, `.git`, `.trash`) are now skipped by default, matching `fd` |
 | `[picker] max_results` | Caps how many results the picker lists at once, without limiting what can be found by typing |
+| `[picker] sort_by` | Sorts by last-modified time (`"mtime,desc"` / `"mtime,asc"`) instead of alphabetically |
 | Picker rooting | Pressing `p` roots the picker at the directory mdviewer was launched from, rather than the open file's folder |
 | Picker key fix | `p` and `q` are literal search characters in the picker; previously they closed it — or quit outright — so no query containing them could be typed |
+| Picker query reset | The picker's search text no longer persists across close/reopen — previously it kept whatever was last typed |
 | Config lookup | Searches `$XDG_CONFIG_HOME`, then `~/.config`, then the platform directory, so the documented `~/.config/…/config.toml` works on macOS too (see [mdterm#66](https://github.com/bahdotsh/mdterm/issues/66)) |
 
 Nothing here is upstreamed yet. If any of it is useful to the original project, it should go
@@ -162,6 +164,10 @@ When launched without file arguments, mdviewer opens a file picker rooted at the
 | `F5` | Refresh file list |
 | `Esc` | Close picker after a file is open |
 
+By default results are sorted alphabetically. Set `[picker] sort_by = "mtime,desc"` to
+show the most recently edited files first instead — see
+[Sorting the picker's results](#sorting-the-pickers-results).
+
 ### Slide Mode (`--slides`)
 
 | Key | Action |
@@ -216,6 +222,7 @@ code_languages = ["dataviewjs", "dataview"]  # fenced languages to drop entirely
 ignore = ["attachments", "Templates"]  # skip these file/directory names
 hidden = false                         # false = skip dot-dirs (.obsidian, .git, .trash)
 max_results = 0                        # cap the list length; 0 = limited only by terminal height
+# sort_by = "mtime,desc"               # sort by last-modified time instead of alphabetically
 ```
 
 ### Verifying it is being read
@@ -256,6 +263,21 @@ skips any file with that name. Matching is case-insensitive.
 
 Dot-directories are skipped by default, the same as `fd`, which keeps `.obsidian/`, `.git/`
 and `.trash/` out of the picker. Set `hidden = true` to include them.
+
+### Sorting the picker's results
+
+By default, results are sorted alphabetically. `[picker] sort_by` switches to sorting by
+last-modified time instead:
+
+```toml
+[picker]
+sort_by = "mtime,desc"  # newest first; "mtime,asc" for oldest first
+```
+
+Sorting applies underneath the fuzzy match ranking: results are still ordered by match
+quality first when you've typed a query, with `sort_by` only deciding the order among
+equally-good matches (and the order of the full, unfiltered list when the query is empty).
+Any value other than `"mtime,desc"` / `"mtime,asc"` falls back to alphabetical.
 
 ### Limiting how many results are listed
 
