@@ -4,6 +4,7 @@ use crossterm::style::Color;
 use std::collections::HashSet;
 
 mod flowchart;
+mod sequence;
 
 // ───── Shared shape/card types ─────
 
@@ -512,5 +513,13 @@ impl Canvas {
 /// Try to render mermaid code as a visual diagram.
 /// Returns (content_rows, content_width) or None if parsing fails.
 pub fn render_mermaid(code: &str, theme: &Theme) -> Option<(Vec<Vec<StyledSpan>>, usize)> {
+    let first_line = code
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("%%"));
+
+    if first_line == Some("sequenceDiagram") {
+        return sequence::render_sequence(code, theme);
+    }
     flowchart::render_flowchart(code, theme)
 }
