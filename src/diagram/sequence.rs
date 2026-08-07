@@ -1,3 +1,5 @@
+use crossterm::style::Color;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Participant {
     pub(crate) id: String,
@@ -589,10 +591,172 @@ pub(crate) fn layout(diagram: &SequenceDiagram) -> Layout {
 
 pub(crate) fn render_sequence(
     code: &str,
-    _theme: &crate::theme::Theme,
+    theme: &crate::theme::Theme,
 ) -> Option<(Vec<Vec<crate::style::StyledSpan>>, usize)> {
-    let _diagram = parse_sequence(code)?;
-    None
+    let diagram = parse_sequence(code)?;
+    let laid_out = layout(&diagram);
+    Some(render(&laid_out, theme))
+}
+
+fn render(
+    laid_out: &Layout,
+    theme: &crate::theme::Theme,
+) -> (Vec<Vec<crate::style::StyledSpan>>, usize) {
+    use super::Canvas;
+    use crate::style::StyledSpan;
+
+    let mut canvas = Canvas::new(laid_out.width, laid_out.height);
+    let border_fg = Some(theme.code_border);
+    let text_fg = Some(theme.fg);
+    let active_fg = Some(theme.h3);
+
+    // Lifelines first (full height) so later draws intentionally overwrite
+    // the cells they cross.
+    for column in &laid_out.columns {
+        for y in 3..laid_out.height {
+            canvas.set(column.center_x, y, '│', border_fg);
+        }
+    }
+
+    for (id, y_start, y_end) in &laid_out.active_spans {
+        if let Some(column) = laid_out.columns.iter().find(|c| &c.id == id) {
+            let end = (*y_end).min(laid_out.height.saturating_sub(1));
+            for y in *y_start..=end {
+                canvas.set(column.center_x, y, '┃', active_fg);
+            }
+        }
+    }
+
+    for column in &laid_out.columns {
+        canvas.draw_node(
+            column.center_x,
+            0,
+            column.width,
+            &column.label,
+            super::NodeShape::Rectangle,
+            border_fg,
+            text_fg,
+        );
+    }
+
+    for item in &laid_out.positioned {
+        render_positioned(&mut canvas, item, border_fg, text_fg, &laid_out.columns);
+    }
+
+    let rows: Vec<Vec<StyledSpan>> = canvas.to_span_rows(theme);
+    let width = laid_out.width;
+    (rows, width)
+}
+
+fn render_positioned(
+    canvas: &mut super::Canvas,
+    item: &Positioned,
+    border_fg: Option<Color>,
+    text_fg: Option<Color>,
+    columns: &[Column],
+) {
+    match item {
+        Positioned::Message { from_x, to_x, label_y, arrow_y, text, line, end } => {
+            if let Some(text) = text {
+                draw_centered(canvas, (*from_x).min(*to_x), (*from_x).max(*to_x), *label_y, text, text_fg);
+            }
+            draw_h_line(canvas, *from_x, *to_x, *arrow_y, *line, *end, border_fg);
+        }
+        Positioned::SelfMessage { x, top_y, label_y, bottom_y, text, end } => {
+            canvas.set(x + 1, *top_y, '─', border_fg);
+            canvas.set(x + 2, *top_y, '╮', border_fg);
+            canvas.set(x + 2, *label_y, '│', border_fg);
+            if let Some(text) = text {
+                for (i, c) in text.chars().enumerate() {
+                    canvas.set(x + 4 + i, *label_y, c, text_fg);
+                }
+            }
+            canvas.set(x + 2, *bottom_y, '╯', border_fg);
+            canvas.set(x + 1, *bottom_y, '─', border_fg);
+            let arrow = if *end == ArrowEnd::Cross { '✗' } else { '◀' };
+            canvas.set(*x, *bottom_y, arrow, border_fg);
+        }
+        Positioned::Note { x_start, x_end, top_y, text } => {
+            let width = x_end.saturating_sub(*x_start).max(4);
+            canvas.draw_node(
+                (x_start + x_end) / 2,
+                *top_y,
+                width,
+                text,
+                super::NodeShape::Rectangle,
+                border_fg,
+                text_fg,
+            );
+        }
+        Positioned::Border { x_start, x_end, y, label, top } => {
+            canvas.set(*x_start, *y, if *top { '┌' } else { '└' }, border_fg);
+            canvas.set(*x_end, *y, if *top { '┐' } else { '┘' }, border_fg);
+            for x in (x_start + 1)..*x_end {
+                let is_lifeline = columns.iter().any(|c| c.center_x == x);
+                let ch = if is_lifeline {
+                    if *top { '┬' } else { '┴' }
+                } else {
+                    '─'
+                };
+                canvas.set(x, *y, ch, border_fg);
+            }
+            if let Some(label) = label {
+                let text = format!(" {label} ");
+                for (i, c) in text.chars().enumerate() {
+                    canvas.set(x_start + 1 + i, *y, c, text_fg);
+                }
+            }
+        }
+    }
+}
+
+fn draw_h_line(
+    canvas: &mut super::Canvas,
+    from_x: usize,
+    to_x: usize,
+    y: usize,
+    line: LineStyle,
+    end: ArrowEnd,
+    fg: Option<Color>,
+) {
+    let (left, right, forward) = if from_x <= to_x { (from_x, to_x, true) } else { (to_x, from_x, false) };
+    let ch = if line == LineStyle::Dashed { '┄' } else { '─' };
+    for x in (left + 1)..right {
+        canvas.set(x, y, ch, fg);
+    }
+    let arrow = match end {
+        ArrowEnd::Arrowhead => {
+            if forward {
+                '▶'
+            } else {
+                '◀'
+            }
+        }
+        ArrowEnd::Cross => '✗',
+        ArrowEnd::None => ch,
+    };
+    if right > left {
+        if forward {
+            canvas.set(right - 1, y, arrow, fg);
+        } else {
+            canvas.set(left + 1, y, arrow, fg);
+        }
+    }
+}
+
+fn draw_centered(
+    canvas: &mut super::Canvas,
+    left: usize,
+    right: usize,
+    y: usize,
+    text: &str,
+    fg: Option<Color>,
+) {
+    let mid = (left + right) / 2;
+    let start = mid.saturating_sub(text.chars().count() / 2);
+    for (i, c) in text.chars().enumerate() {
+        canvas.set(start + i, y, c, fg);
+    }
 }
 
 #[cfg(test)]
@@ -951,5 +1115,47 @@ mod tests {
         assert_eq!(l.active_spans.len(), 1);
         assert_eq!(l.active_spans[0].0, "B");
         assert_eq!(l.active_spans[0].2, l.height - 1);
+    }
+
+    fn flatten(rows: &[Vec<crate::style::StyledSpan>]) -> String {
+        rows.iter()
+            .map(|row| row.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn renders_participants_messages_and_note() {
+        let theme = crate::theme::Theme::dark();
+        let code = "sequenceDiagram\n\
+                     participant A as Alice\n\
+                     participant B as Bob\n\
+                     A->>B: hello\n\
+                     B-->>A: hi back\n\
+                     Note over A,B: they are friends\n";
+        let (rows, width) = render_sequence(code, &theme).expect("should render");
+        let text = flatten(&rows);
+        assert!(text.contains("Alice"), "expected participant label in:\n{text}");
+        assert!(text.contains("Bob"), "expected participant label in:\n{text}");
+        assert!(text.contains("hello"), "expected message text in:\n{text}");
+        assert!(text.contains("hi back"), "expected message text in:\n{text}");
+        assert!(text.contains("they are friends"), "expected note text in:\n{text}");
+        assert!(text.contains('▶'), "expected a solid arrowhead for ->>");
+        assert!(width > 0);
+    }
+
+    #[test]
+    fn renders_loop_block_border_with_label() {
+        let theme = crate::theme::Theme::dark();
+        let code = "sequenceDiagram\nA->>B: hi\nloop Every request\nA->>B: poll\nend\n";
+        let (rows, _width) = render_sequence(code, &theme).expect("should render");
+        let text = flatten(&rows);
+        assert!(text.contains("loop Every request"), "expected loop label in:\n{text}");
+    }
+
+    #[test]
+    fn non_sequence_input_still_falls_through_to_none() {
+        let theme = crate::theme::Theme::dark();
+        assert!(render_sequence("graph TD\nA-->B\n", &theme).is_none());
     }
 }
