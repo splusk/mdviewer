@@ -304,6 +304,289 @@ fn split_message(spec: &str) -> Option<(String, LineStyle, ArrowEnd, bool, Strin
     Some((from, style, end, activate, to, deactivate))
 }
 
+pub(crate) struct Column {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) center_x: usize,
+    pub(crate) width: usize,
+}
+
+pub(crate) enum Positioned {
+    Message {
+        from_x: usize,
+        to_x: usize,
+        label_y: usize,
+        arrow_y: usize,
+        text: Option<String>,
+        line: LineStyle,
+        end: ArrowEnd,
+    },
+    SelfMessage {
+        x: usize,
+        top_y: usize,
+        label_y: usize,
+        bottom_y: usize,
+        text: Option<String>,
+        end: ArrowEnd,
+    },
+    Note {
+        x_start: usize,
+        x_end: usize,
+        top_y: usize,
+        text: String,
+    },
+    Border {
+        x_start: usize,
+        x_end: usize,
+        y: usize,
+        label: Option<String>,
+        top: bool,
+    },
+}
+
+pub(crate) struct Layout {
+    pub(crate) columns: Vec<Column>,
+    pub(crate) positioned: Vec<Positioned>,
+    pub(crate) active_spans: Vec<(String, usize, usize)>,
+    pub(crate) width: usize,
+    pub(crate) height: usize,
+}
+
+const COLUMN_GAP: usize = 4;
+const LEFT_MARGIN: usize = 2;
+const BLOCK_MARGIN: usize = 3;
+
+fn box_width(label: &str) -> usize {
+    (label.chars().count() + 4).max(10)
+}
+
+fn build_columns(participants: &[Participant]) -> Vec<Column> {
+    let mut x = LEFT_MARGIN;
+    participants
+        .iter()
+        .map(|p| {
+            let width = box_width(&p.label);
+            let center_x = x + width / 2;
+            x += width + COLUMN_GAP;
+            Column { id: p.id.clone(), label: p.label.clone(), center_x, width }
+        })
+        .collect()
+}
+
+fn column_center(columns: &[Column], id: &str) -> Option<usize> {
+    columns.iter().find(|c| c.id == id).map(|c| c.center_x)
+}
+
+fn note_span(columns: &[Column], target: &NoteTarget) -> (usize, usize) {
+    match target {
+        NoteTarget::Over(a, Some(b)) => {
+            let xa = column_center(columns, a).unwrap_or(0);
+            let xb = column_center(columns, b).unwrap_or(0);
+            (xa.min(xb), xa.max(xb))
+        }
+        NoteTarget::Over(a, None) => {
+            let x = column_center(columns, a).unwrap_or(0);
+            (x, x)
+        }
+        NoteTarget::LeftOf(a) => {
+            let x = column_center(columns, a).unwrap_or(0);
+            (x.saturating_sub(4), x.saturating_sub(2))
+        }
+        NoteTarget::RightOf(a) => {
+            let x = column_center(columns, a).unwrap_or(0);
+            (x + 2, x + 4)
+        }
+    }
+}
+
+fn center_span(mid_start: usize, mid_end: usize, box_w: usize) -> (usize, usize) {
+    let mid = (mid_start + mid_end) / 2;
+    let half = box_w / 2;
+    let start = mid.saturating_sub(half);
+    (start, start + box_w)
+}
+
+fn widen(columns: &[Column], id: &str, min_x: &mut usize, max_x: &mut usize) {
+    if let Some(x) = column_center(columns, id) {
+        *min_x = (*min_x).min(x);
+        *max_x = (*max_x).max(x);
+    }
+}
+
+fn scan_events_span(events: &[Event], columns: &[Column], min_x: &mut usize, max_x: &mut usize) {
+    for event in events {
+        match event {
+            Event::Message(m) => {
+                widen(columns, &m.from, min_x, max_x);
+                widen(columns, &m.to, min_x, max_x);
+            }
+            Event::Note(n) => {
+                for id in note_participant_ids(&n.target) {
+                    widen(columns, &id, min_x, max_x);
+                }
+            }
+            Event::Activate(id) | Event::Deactivate(id) => widen(columns, id, min_x, max_x),
+            Event::Block(b) => {
+                for section in &b.sections {
+                    scan_events_span(&section.events, columns, min_x, max_x);
+                }
+            }
+        }
+    }
+}
+
+fn block_span(sections: &[BlockSection], columns: &[Column]) -> (usize, usize) {
+    let mut min_x = usize::MAX;
+    let mut max_x = 0usize;
+    for section in sections {
+        scan_events_span(&section.events, columns, &mut min_x, &mut max_x);
+    }
+    if min_x == usize::MAX {
+        min_x = columns.first().map(|c| c.center_x).unwrap_or(0);
+        max_x = columns.last().map(|c| c.center_x).unwrap_or(0);
+    }
+    (min_x.saturating_sub(BLOCK_MARGIN), max_x + BLOCK_MARGIN)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_events(
+    events: &[Event],
+    columns: &[Column],
+    cursor: &mut usize,
+    positioned: &mut Vec<Positioned>,
+    active_spans: &mut Vec<(String, usize, usize)>,
+    active_since: &mut std::collections::HashMap<String, usize>,
+    max_x: &mut usize,
+) {
+    for event in events {
+        match event {
+            Event::Message(m) => {
+                let from_x = column_center(columns, &m.from).unwrap_or(0);
+                let to_x = column_center(columns, &m.to).unwrap_or(0);
+
+                if m.from == m.to {
+                    let top_y = *cursor;
+                    let label_y = top_y + 1;
+                    let bottom_y = top_y + 2;
+                    positioned.push(Positioned::SelfMessage {
+                        x: from_x,
+                        top_y,
+                        label_y,
+                        bottom_y,
+                        text: m.text.clone(),
+                        end: m.end,
+                    });
+                    *max_x = (*max_x).max(from_x + 8);
+                    *cursor = bottom_y + 1;
+                } else {
+                    let label_y = *cursor;
+                    let arrow_y = label_y + 1;
+                    positioned.push(Positioned::Message {
+                        from_x,
+                        to_x,
+                        label_y,
+                        arrow_y,
+                        text: m.text.clone(),
+                        line: m.line,
+                        end: m.end,
+                    });
+                    *max_x = (*max_x).max(from_x.max(to_x) + 2);
+                    *cursor = arrow_y + 1;
+                }
+
+                // "+" activates the message's destination (the callee).
+                // "-" deactivates the message's SOURCE, not its destination
+                // — e.g. in `B-->>-A: reply`, it's B that deactivates, even
+                // though `-` sits right before `A`. This matches Mermaid's
+                // own activation shorthand semantics.
+                if m.activate {
+                    active_since.insert(m.to.clone(), *cursor);
+                }
+                if m.deactivate
+                    && let Some(start) = active_since.remove(&m.from)
+                {
+                    active_spans.push((m.from.clone(), start, *cursor));
+                }
+            }
+            Event::Activate(id) => {
+                active_since.insert(id.clone(), *cursor);
+            }
+            Event::Deactivate(id) => {
+                if let Some(start) = active_since.remove(id) {
+                    active_spans.push((id.clone(), start, *cursor));
+                }
+            }
+            Event::Note(n) => {
+                let (mid_start, mid_end) = note_span(columns, &n.target);
+                let min_box_w = box_width(&n.text);
+                let box_w = min_box_w.max(mid_end.saturating_sub(mid_start) + 4);
+                let (x_start, x_end) = center_span(mid_start, mid_end, box_w);
+                let top_y = *cursor;
+                positioned.push(Positioned::Note { x_start, x_end, top_y, text: n.text.clone() });
+                *max_x = (*max_x).max(x_end + 2);
+                *cursor = top_y + 3;
+            }
+            Event::Block(b) => {
+                let (x_start, x_end) = block_span(&b.sections, columns);
+                for (i, section) in b.sections.iter().enumerate() {
+                    positioned.push(Positioned::Border {
+                        x_start,
+                        x_end,
+                        y: *cursor,
+                        label: Some(section.label.clone()),
+                        top: true,
+                    });
+                    *cursor += 1;
+                    layout_events(
+                        &section.events,
+                        columns,
+                        cursor,
+                        positioned,
+                        active_spans,
+                        active_since,
+                        max_x,
+                    );
+                    let _ = i;
+                }
+                positioned.push(Positioned::Border { x_start, x_end, y: *cursor, label: None, top: false });
+                *cursor += 1;
+                *max_x = (*max_x).max(x_end + 2);
+            }
+        }
+    }
+}
+
+pub(crate) fn layout(diagram: &SequenceDiagram) -> Layout {
+    let columns = build_columns(&diagram.participants);
+    let mut cursor = 3; // rows 0..3 hold the participant boxes
+    let mut positioned = Vec::new();
+    let mut active_spans = Vec::new();
+    let mut active_since: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut max_x = columns.last().map(|c| c.center_x + c.width / 2).unwrap_or(10);
+
+    layout_events(
+        &diagram.events,
+        &columns,
+        &mut cursor,
+        &mut positioned,
+        &mut active_spans,
+        &mut active_since,
+        &mut max_x,
+    );
+
+    for (id, start) in active_since {
+        active_spans.push((id, start, cursor.saturating_sub(1)));
+    }
+
+    Layout {
+        columns,
+        positioned,
+        active_spans,
+        width: max_x + BLOCK_MARGIN,
+        height: cursor,
+    }
+}
+
 pub(crate) fn render_sequence(
     code: &str,
     _theme: &crate::theme::Theme,
@@ -543,5 +826,130 @@ mod tests {
     #[test]
     fn empty_sequence_diagram_returns_none() {
         assert_eq!(parse_sequence("sequenceDiagram\n"), None);
+    }
+
+    fn column_x(layout: &Layout, id: &str) -> usize {
+        layout
+            .columns
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.center_x)
+            .unwrap_or_else(|| panic!("no column for participant {id}"))
+    }
+
+    #[test]
+    fn columns_are_laid_out_left_to_right_in_declaration_order() {
+        let d = parse_sequence("sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\n")
+            .expect("should parse");
+        let l = layout(&d);
+        assert_eq!(l.columns.len(), 3);
+        assert!(column_x(&l, "A") < column_x(&l, "B"));
+        assert!(column_x(&l, "B") < column_x(&l, "C"));
+    }
+
+    #[test]
+    fn message_row_assigns_label_then_arrow_row_below_it() {
+        let d = parse_sequence("sequenceDiagram\nA->>B: hi\nA->>B: again\n").expect("should parse");
+        let l = layout(&d);
+        let rows: Vec<(usize, usize)> = l
+            .positioned
+            .iter()
+            .filter_map(|p| match p {
+                Positioned::Message { label_y, arrow_y, .. } => Some((*label_y, *arrow_y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, rows[0].0 + 1, "arrow row is directly below the label row");
+        assert!(rows[1].0 > rows[0].1, "second message starts after the first one's arrow row");
+    }
+
+    #[test]
+    fn self_message_uses_three_rows() {
+        let d = parse_sequence("sequenceDiagram\nA->>A: think\n").expect("should parse");
+        let l = layout(&d);
+        match &l.positioned[0] {
+            Positioned::SelfMessage { top_y, label_y, bottom_y, .. } => {
+                assert_eq!(*label_y, *top_y + 1);
+                assert_eq!(*bottom_y, *top_y + 2);
+            }
+            _ => panic!("expected a self-message"),
+        }
+    }
+
+    #[test]
+    fn note_over_two_participants_spans_between_their_columns() {
+        let d = parse_sequence("sequenceDiagram\nA->>B: hi\nNote over A,B: both\n")
+            .expect("should parse");
+        let l = layout(&d);
+        let ax = column_x(&l, "A");
+        let bx = column_x(&l, "B");
+        match l.positioned.iter().find(|p| matches!(p, Positioned::Note { .. })).unwrap() {
+            Positioned::Note { x_start, x_end, .. } => {
+                assert!(*x_start <= ax.min(bx));
+                assert!(*x_end >= ax.max(bx));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn block_span_covers_only_the_participants_it_references() {
+        let d = parse_sequence(
+            "sequenceDiagram\nparticipant A\nparticipant B\nparticipant C\nloop x\nA->>B: hi\nend\n",
+        )
+        .expect("should parse");
+        let l = layout(&d);
+        let ax = column_x(&l, "A");
+        let bx = column_x(&l, "B");
+        let cx = column_x(&l, "C");
+
+        let borders: Vec<&Positioned> =
+            l.positioned.iter().filter(|p| matches!(p, Positioned::Border { .. })).collect();
+        assert_eq!(borders.len(), 2, "one top + one bottom border for a single-section loop");
+        match borders[0] {
+            Positioned::Border { x_start, x_end, .. } => {
+                assert!(*x_start <= ax.min(bx));
+                assert!(*x_end >= ax.max(bx));
+                assert!(*x_end < cx, "block must not extend to C, which it never references");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn nested_alt_else_produces_top_divider_and_bottom_borders() {
+        let d = parse_sequence(
+            "sequenceDiagram\nalt happy\nA->>B: ok\nelse sad\nA->>B: retry\nend\n",
+        )
+        .expect("should parse");
+        let l = layout(&d);
+        let borders: Vec<&Positioned> =
+            l.positioned.iter().filter(|p| matches!(p, Positioned::Border { .. })).collect();
+        // top border ("alt happy"), divider ("else sad"), bottom border.
+        assert_eq!(borders.len(), 3);
+    }
+
+    #[test]
+    fn activation_span_runs_from_activate_to_deactivate() {
+        // Mermaid's `-` shorthand deactivates the SOURCE of that arrow, not
+        // the destination it's textually adjacent to: in `B-->>-A`, it's B
+        // (the source, already active from the earlier `+B`) that
+        // deactivates, even though `-` sits right before `A`. This mirrors
+        // real Mermaid's own "Alice->>+John: ...\nJohn-->>-Alice: ..." example,
+        // where John (not Alice) is the one whose activation bar ends.
+        let d = parse_sequence("sequenceDiagram\nA->>+B: go\nB->>B: work\nB-->>-A: done\n")
+            .expect("should parse");
+        let l = layout(&d);
+        assert_eq!(l.active_spans, vec![("B".to_string(), 5, 10)]);
+    }
+
+    #[test]
+    fn activation_never_deactivated_stays_active_through_diagram_end() {
+        let d = parse_sequence("sequenceDiagram\nA->>+B: go\n").expect("should parse");
+        let l = layout(&d);
+        assert_eq!(l.active_spans.len(), 1);
+        assert_eq!(l.active_spans[0].0, "B");
+        assert_eq!(l.active_spans[0].2, l.height - 1);
     }
 }
