@@ -33,6 +33,16 @@ vault in the terminal — and adds only the following on top:
 | Picker key fix | `p` and `q` are literal search characters in the picker; previously they closed it — or quit outright — so no query containing them could be typed |
 | Picker query reset | The picker's search text no longer persists across close/reopen — previously it kept whatever was last typed |
 | Config lookup | Searches `$XDG_CONFIG_HOME`, then `~/.config`, then the platform directory, so the documented `~/.config/…/config.toml` works on macOS too (see [mdterm#66](https://github.com/bahdotsh/mdterm/issues/66)) |
+| Wikilinks | Rewrites Obsidian-style `[[note]]` links and `![[image.png]]` / `![[file.pdf]]` embeds into standard Markdown before parsing, so they render and navigate like ordinary links/images. Tolerates a literal `]` inside the target (e.g. `![[Offer Letter [Name].pdf]]`), which previously broke the regex and left the whole embed as unrendered raw text |
+| Wikilink embed resolution | `![[photo.png]]` resolves by searching the note's own directory first, then its ancestors (nearest first) — one shared `attachments/` folder anywhere above a note resolves for every note nested under it, no path needed in the embed itself |
+| `attachment_folder_path` | Extra subfolder name (e.g. `"attachments"`) checked at each level of that ancestor search — for vaults that keep a dedicated attachments folder *alongside* each note rather than shared above them |
+| Image path fix | Local image paths resolve relative to the markdown file's own directory, not mdviewer's current working directory |
+| Quick Look preview | `Enter` or click on a wikilink embed's caption opens the real file at full quality via the OS's native previewer (`qlmanage`/`open`) instead of a "Blocked: unsupported URL scheme" toast |
+| Non-image embed captions | A hidden or non-image wikilink embed (e.g. an attached PDF) shows its caption/link instead of leaving a block of dead space where a stuck `[ Loading: ... ]` placeholder used to sit forever |
+| iTerm2 tmux fix | Chunks the inline-image escape sequence for iTerm2 under tmux, fixing images that silently failed to render when the sequence exceeded tmux's passthrough buffer |
+| Mermaid sequence diagrams | `sequenceDiagram` blocks get a real parser and renderer — participants, all arrow variants, activation shorthand, notes, nested `loop`/`alt`/`opt`/`par` — instead of being fed to the flowchart-only parser and rendering as scrambled one-word boxes |
+| `Shift+P` | Copies the current file's full canonicalized path to the clipboard |
+| Picker mouse click | Left-clicking a file-picker entry selects it and copies its full path to the clipboard |
 
 Nothing here is upstreamed yet. If any of it is useful to the original project, it should go
 there — the intent of this fork is personal use, not divergence.
@@ -61,8 +71,10 @@ Licensed MIT, the same as the original.
 - **Heading jumps** — `[` / `]` to jump between sections
 - **Local file links** — Click or select relative markdown links to navigate between files, with `Backspace` to go back
 - **Link picker** — Press `f` to list all links, type a number to open in browser
-- **Click-to-copy** — Click any heading section, list, or code block to copy it; `Y` copies full document, `c` copies nearest code block
-- **Mermaid diagrams** — Visual rendering of flowcharts/graphs in the terminal with box-drawing characters
+- **Click-to-copy** — Click any heading section, list, or code block to copy it; `Y` copies full document, `c` copies nearest code block, `Shift+P` copies the current file's full path
+- **Wikilinks** — Obsidian-style `[[note]]` links and `![[embed]]` images/attachments render and navigate like ordinary Markdown
+- **Quick Look preview** — `Enter` or click a wikilink embed's caption to open the real file at full quality in the OS's native previewer
+- **Mermaid diagrams** — Visual rendering of flowcharts and sequence diagrams in the terminal with box-drawing characters
 - **Math rendering** — LaTeX to Unicode: `$\alpha + \beta$` renders as `α + β`
 - **Slide mode** — `--slides` treats `---` as slide separators for terminal presentations
 - **Auto-reload** — Automatically detects file changes and reloads (via inotify/FSEvents/kqueue)
@@ -146,6 +158,7 @@ mdviewer README.md | less -R
 | Click code block | Copy code block to clipboard |
 | `Y` | Copy entire document to clipboard |
 | `c` | Copy nearest code block to clipboard |
+| `Shift+P` | Copy the current file's full path to clipboard |
 | `Tab` / `Shift+Tab` | Switch between files |
 | `h` / `?` / `F1` | Help screen |
 | `q` / `Ctrl+C` | Quit |
@@ -161,6 +174,7 @@ When launched without file arguments, mdviewer opens a file picker rooted at the
 | `Page Up` / `Page Down` | Move by page |
 | `Home` / `End` | Jump to first / last result |
 | `Enter` | Open selected file |
+| Click entry | Select the file and copy its full path to clipboard |
 | `F5` | Refresh file list |
 | `Esc` | Close picker after a file is open |
 
@@ -209,6 +223,7 @@ Every key is optional — omit anything you don't care about.
 theme = "dark"        # "dark" or "light"
 line_numbers = false  # line numbers inside code blocks
 width = 0             # display width, 0 = auto-detect
+# attachment_folder_path = "attachments"  # extra subfolder checked when resolving ![[bare-filename]] embeds
 
 # Content that is parsed but never drawn.
 [hide]
@@ -295,6 +310,25 @@ through the rest. The counter in the box header keeps showing the true totals, s
 `237/1041` means 237 files match your query out of 1041 discovered.
 
 `0` (the default) means the list is limited only by terminal height.
+
+### Finding attachments outside the ancestor search
+
+A wikilink embed by bare filename, `![[photo.png]]`, resolves by checking the note's own
+directory, then walking upward through its ancestors until a `photo.png` turns up. That
+covers a vault with one shared attachments folder sitting *above* every note.
+
+It does **not** cover a folder that sits *alongside* notes instead — e.g. every note
+directory has its own nested `attachments/` next to it, rather than one shared folder
+higher up the tree. `attachment_folder_path` adds that as one more candidate at each level
+of the same search: alongside `<dir>/photo.png`, it also tries
+`<dir>/<attachment_folder_path>/photo.png` before moving up to the next ancestor.
+
+```toml
+attachment_folder_path = "attachments"
+```
+
+Applies to wikilink embeds only (`![[...]]`) — plain CommonMark images (`![](path)`) are
+unaffected, same as the ancestor search itself.
 
 ### CLI vs config
 
