@@ -34,7 +34,7 @@ vault in the terminal — and adds only the following on top:
 | Picker query reset | The picker's search text no longer persists across close/reopen — previously it kept whatever was last typed |
 | Config lookup | Searches `$XDG_CONFIG_HOME`, then `~/.config`, then the platform directory, so the documented `~/.config/…/config.toml` works on macOS too (see [mdterm#66](https://github.com/bahdotsh/mdterm/issues/66)) |
 | Wikilinks | Rewrites Obsidian-style `[[note]]` links and `![[image.png]]` / `![[file.pdf]]` embeds into standard Markdown before parsing, so they render and navigate like ordinary links/images. Tolerates a literal `]` inside the target (e.g. `![[Offer Letter [Name].pdf]]`), which previously broke the regex and left the whole embed as unrendered raw text |
-| Wikilink embed resolution | `![[photo.png]]` resolves by searching the note's own directory first, then its ancestors (nearest first) — one shared `attachments/` folder anywhere above a note resolves for every note nested under it, no path needed in the embed itself |
+| Wikilink embed resolution | An embed resolves by searching the note's own directory first, then its ancestors (nearest first), joining whatever target the embed carries onto each — so `![[attachments/photo.png]]` finds a shared `attachments/` folder anywhere above the note. A **bare** `![[photo.png]]` only matches a same-named file sitting directly in one of those directories, not inside a subfolder — see `attachment_folder_path` below for that case |
 | `attachment_folder_path` | Extra subfolder name (e.g. `"attachments"`) checked at each level of that ancestor search — for vaults that keep a dedicated attachments folder *alongside* each note rather than shared above them |
 | Image path fix | Local image paths resolve relative to the markdown file's own directory, not mdviewer's current working directory |
 | Quick Look preview | `Enter` or click on a wikilink embed's caption opens the real file at full quality via the OS's native previewer (`qlmanage`/`open`) instead of a "Blocked: unsupported URL scheme" toast |
@@ -311,17 +311,19 @@ through the rest. The counter in the box header keeps showing the true totals, s
 
 `0` (the default) means the list is limited only by terminal height.
 
-### Finding attachments outside the ancestor search
+### Finding a bare-filename embed inside an attachments folder
 
-A wikilink embed by bare filename, `![[photo.png]]`, resolves by checking the note's own
-directory, then walking upward through its ancestors until a `photo.png` turns up. That
-covers a vault with one shared attachments folder sitting *above* every note.
+The ancestor search only ever looks for the exact target the embed carries. Write the
+subfolder into the embed — `![[attachments/photo.png]]` — and it finds `attachments/`
+anywhere above the note, no config needed.
 
-It does **not** cover a folder that sits *alongside* notes instead — e.g. every note
-directory has its own nested `attachments/` next to it, rather than one shared folder
-higher up the tree. `attachment_folder_path` adds that as one more candidate at each level
-of the same search: alongside `<dir>/photo.png`, it also tries
-`<dir>/<attachment_folder_path>/photo.png` before moving up to the next ancestor.
+A **bare** filename embed, `![[photo.png]]`, is different: it only matches a `photo.png`
+sitting *directly* inside the note's own directory or one of its ancestors. It does **not**
+look inside an `attachments/` subfolder at any of those levels — Obsidian, though, commonly
+writes bare-filename embeds even when the file actually lives in a dedicated attachments
+folder. `attachment_folder_path` closes that gap: for bare-filename embeds only, it adds
+one more candidate at each level of the same search — alongside `<dir>/photo.png`, it also
+tries `<dir>/<attachment_folder_path>/photo.png` before moving up to the next ancestor.
 
 ```toml
 attachment_folder_path = "attachments"
