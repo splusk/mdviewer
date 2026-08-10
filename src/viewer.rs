@@ -38,6 +38,7 @@ pub struct ViewerOptions {
     pub start_in_picker: bool,
     pub hide: HideConfig,
     pub picker: PickerConfig,
+    pub attachment_folder_path: Option<String>,
 }
 
 pub fn run(opts: ViewerOptions) -> io::Result<()> {
@@ -431,7 +432,8 @@ impl ViewerState {
             None
         };
 
-        let image_cache = crate::image::ImageCache::new();
+        let mut image_cache = crate::image::ImageCache::new();
+        image_cache.set_attachment_folder(opts.attachment_folder_path);
 
         ViewerState {
             files: opts.files,
@@ -2212,8 +2214,12 @@ fn dispatch_link(state: &mut ViewerState, url: &str) {
             None => state.set_toast(format!("Wikilink not found: {}", target)),
         }
     } else if let Some(target) = url.strip_prefix("mdembed:") {
-        let resolved =
-            crate::image::resolve_local_image_path(target, state.image_cache.base_dir(), true);
+        let resolved = crate::image::resolve_local_image_path(
+            target,
+            state.image_cache.base_dir(),
+            true,
+            state.image_cache.attachment_folder(),
+        );
         match resolved {
             Some(path) => match preview_file(&path) {
                 Ok(_) => state.set_toast(format!("Previewing: {}", target)),
@@ -5002,6 +5008,7 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachment_folder_path: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.wrapped = lines;
@@ -5178,6 +5185,7 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachment_folder_path: None,
         };
         ViewerState::new(opts, 80, 24)
     }
@@ -5200,6 +5208,7 @@ mod tests {
             start_in_picker: false,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachment_folder_path: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.rebuild();

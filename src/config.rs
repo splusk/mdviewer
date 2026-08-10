@@ -14,6 +14,13 @@ pub struct Config {
     pub hide: HideConfig,
     #[serde(default)]
     pub picker: PickerConfig,
+    /// Extra subfolder name checked when resolving a wikilink embed
+    /// (`![[photo.png]]`) that isn't found directly, e.g. `"attachments"`.
+    /// Checked at each directory level alongside the existing ancestor
+    /// search — see `image::resolve_local_image_path`. Plain CommonMark
+    /// images (`![](path)`) are unaffected.
+    #[serde(default)]
+    pub attachment_folder_path: Option<String>,
 }
 
 /// Which files the file picker will offer.
@@ -112,6 +119,7 @@ impl Default for Config {
             width: 0,
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
+            attachment_folder_path: None,
         }
     }
 }

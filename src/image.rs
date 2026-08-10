@@ -924,6 +924,9 @@ pub struct ImageCache {
     /// Directory of the currently open markdown file. Local image references
     /// are resolved relative to this, not the process's working directory.
     base_dir: PathBuf,
+    /// Extra subfolder name checked when resolving a wikilink embed, from
+    /// `Config::attachment_folder_path`. See `resolve_local_image_path`.
+    attachment_folder: Option<String>,
 
     // Kitty: image uploaded once, placed per-frame (None = encode failed)
     kitty_images: HashMap<String, Option<KittyImage>>,
@@ -976,6 +979,7 @@ impl ImageCache {
             protocol,
             in_tmux,
             base_dir: PathBuf::from("."),
+            attachment_folder: None,
             kitty_images: HashMap::new(),
             kitty_unicode_images: HashMap::new(),
             // Starts at 0; wrapping_add(1) before first use ensures IDs begin at 1.
@@ -1071,13 +1075,15 @@ impl ImageCache {
         let sender = self.sender.clone();
         let url_owned = url.to_string();
         let base_dir = self.base_dir.clone();
+        let attachment_folder = self.attachment_folder.clone();
         std::thread::spawn(move || {
             // Guard against panics in image decoding/downscaling so that
             // the channel always receives a result and the in_flight slot
             // is freed by poll_completed(). Without this, a panic would
             // leave the URL stuck in in_flight permanently.
             let img = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                fetch_image(&url_owned, &base_dir).map(|img| downscale(img, MAX_SOURCE_DIM))
+                fetch_image(&url_owned, &base_dir, attachment_folder.as_deref())
+                    .map(|img| downscale(img, MAX_SOURCE_DIM))
             }))
             .unwrap_or(None);
             let _ = sender.send((url_owned, img));
@@ -1131,6 +1137,17 @@ impl ImageCache {
         &self.base_dir
     }
 
+    /// Set the attachment subfolder name checked as a fallback when
+    /// resolving wikilink embeds. Does not invalidate the cache — unlike
+    /// `base_dir`, this is a static setting from config, not per-file state.
+    pub fn set_attachment_folder(&mut self, folder: Option<String>) {
+        self.attachment_folder = folder;
+    }
+
+    pub(crate) fn attachment_folder(&self) -> Option<&str> {
+        self.attachment_folder.as_deref()
+    }
+
     pub fn image_dimensions(&self, url: &str) -> Option<(u32, u32)> {
         self.images.get(url)?.as_ref().map(|img| img.dimensions())
     }
@@ -1161,8 +1178,8 @@ impl ImageCache {
         if self.images.contains_key(url) {
             return;
         }
-        let img =
-            fetch_image(url, &self.base_dir).map(|img| Arc::new(downscale(img, MAX_SOURCE_DIM)));
+        let img = fetch_image(url, &self.base_dir, self.attachment_folder.as_deref())
+            .map(|img| Arc::new(downscale(img, MAX_SOURCE_DIM)));
         self.images.insert(url.to_string(), img);
     }
 
@@ -1222,6 +1239,7 @@ impl ImageCache {
         // the render channel is replaced before the thread completes (M3 fix).
         let temp_files_ref = Arc::clone(&self.temp_files);
         let base_dir = self.base_dir.clone();
+        let attachment_folder = self.attachment_folder.clone();
         std::thread::spawn(move || {
             // SAFETY (AssertUnwindSafe): all captured values are either owned
             // or wrapped in Arc/Mutex, which are both Send + unwind-safe at the
@@ -1248,6 +1266,7 @@ impl ImageCache {
                     bg,
                     kitty_id,
                     &base_dir,
+                    attachment_folder.as_deref(),
                     terminology.as_ref(),
                 )
             }))
@@ -1902,6 +1921,7 @@ fn pre_render_image(
     bg: (u8, u8, u8),
     kitty_id: u32,
     base_dir: &Path,
+    attachment_folder: Option<&str>,
     terminology: Option<&TerminologyCtx<'_>>,
 ) -> Option<PreRenderedResult> {
     let (img_w, img_h) = img.dimensions();
@@ -1986,7 +2006,15 @@ fn pre_render_image(
         ImageProtocol::Terminology => {
             let ctx = terminology
                 .expect("pre_render_image: Terminology protocol requires a TerminologyCtx");
-            pre_render_terminology(img, ctx.url, content_width, cell_metrics, base_dir).map(|ti| {
+            pre_render_terminology(
+                img,
+                ctx.url,
+                content_width,
+                cell_metrics,
+                base_dir,
+                attachment_folder,
+            )
+            .map(|ti| {
                 if ti.is_temp {
                     // Register the temp path in the shared registry *before* wrapping
                     // the result, so it is cleaned up even if the render channel is
@@ -2071,6 +2099,7 @@ fn pre_render_terminology(
     content_width: usize,
     cell_metrics: CellMetrics,
     base_dir: &Path,
+    attachment_folder: Option<&str>,
 ) -> Option<TerminologyImage> {
     let (img_w, img_h) = img.dimensions();
     let (cols, rows) = calc_display_cells(
@@ -2101,7 +2130,8 @@ fn pre_render_terminology(
     // Local file path that still exists on disk — reuse directly, no I/O needed.
     // Terminology requires an absolute path, so canonicalize before passing.
     if !is_remote
-        && let Some(resolved) = resolve_local_image_path(target, base_dir, is_embed)
+        && let Some(resolved) =
+            resolve_local_image_path(target, base_dir, is_embed, attachment_folder)
         && let Ok(abs) = std::fs::canonicalize(&resolved)
     {
         // SEC: Reject if the resolved path escapes the directory it was found
@@ -2234,9 +2264,14 @@ fn downscale(img: DynamicImage, max_dim: u32) -> DynamicImage {
 /// `node_modules` folder. So `![[attachments/photo.png]]` finds the nearest
 /// ancestor directory that has an `attachments/photo.png` under it, however
 /// deeply the linking file is nested below it, and `![[photo.png]]` finds
-/// the nearest ancestor with a `photo.png` directly inside it. No
-/// configuration is involved — whatever subpath (if any) the wikilink
-/// itself carries is what gets searched for.
+/// the nearest ancestor with a `photo.png` directly inside it. Whatever
+/// subpath (if any) the wikilink itself carries is what gets searched for.
+///
+/// `attachment_folder` (from `Config::attachment_folder_path`) adds one more
+/// candidate at each level of that same search, for embeds only: alongside
+/// `<dir>/photo.png`, also try `<dir>/<attachment_folder>/photo.png` before
+/// moving up to the next ancestor. This covers vaults that keep attachments
+/// in a dedicated folder and link to them by bare filename.
 ///
 /// Returns `None` if `target` is an absolute path or contains a `..`
 /// component (both rejected to prevent a markdown file from reading
@@ -2246,6 +2281,7 @@ pub(crate) fn resolve_local_image_path(
     target: &str,
     base_dir: &Path,
     is_embed: bool,
+    attachment_folder: Option<&str>,
 ) -> Option<PathBuf> {
     let path = Path::new(target);
     if path.is_absolute() {
@@ -2264,11 +2300,24 @@ pub(crate) fn resolve_local_image_path(
     }
 
     if is_embed {
+        if let Some(folder) = attachment_folder {
+            let candidate = base_dir.join(folder).join(path);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+
         let mut dir = base_dir.parent();
         while let Some(d) = dir {
             let candidate = d.join(path);
             if candidate.is_file() {
                 return Some(candidate);
+            }
+            if let Some(folder) = attachment_folder {
+                let candidate = d.join(folder).join(path);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
             dir = d.parent();
         }
@@ -2277,7 +2326,11 @@ pub(crate) fn resolve_local_image_path(
     None
 }
 
-fn fetch_image(url: &str, base_dir: &Path) -> Option<DynamicImage> {
+fn fetch_image(
+    url: &str,
+    base_dir: &Path,
+    attachment_folder: Option<&str>,
+) -> Option<DynamicImage> {
     let (target, is_embed) = match url.strip_prefix("mdembed:") {
         Some(target) => (target, true),
         None => (url, false),
@@ -2285,7 +2338,7 @@ fn fetch_image(url: &str, base_dir: &Path) -> Option<DynamicImage> {
     if target.starts_with("http://") || target.starts_with("https://") {
         return fetch_image_http(target);
     }
-    let path = resolve_local_image_path(target, base_dir, is_embed)?;
+    let path = resolve_local_image_path(target, base_dir, is_embed, attachment_folder)?;
     image::open(path).ok()
 }
 
@@ -3493,7 +3546,7 @@ mod tests {
             .map(|rd| rd.flatten().count())
             .unwrap_or(0);
 
-        let result = pre_render_terminology(&img, "photo.png", 80, metrics, &root)
+        let result = pre_render_terminology(&img, "photo.png", 80, metrics, &root, None)
             .expect("pre_render_terminology returned None for a local path within base_dir");
 
         let after_count = std::fs::read_dir(&priv_dir)
@@ -3548,6 +3601,7 @@ mod tests {
             80,
             metrics,
             &note_dir,
+            None,
         )
         .expect("pre_render_terminology did not find the ancestor attachments folder");
 
@@ -3585,7 +3639,7 @@ mod tests {
                 cell_w_px: 8,
                 cell_h_px: 16,
             };
-            let result = pre_render_terminology(&img, "photo.png", 80, metrics, &root);
+            let result = pre_render_terminology(&img, "photo.png", 80, metrics, &root, None);
             std::fs::remove_dir_all(&root).ok();
             std::fs::remove_dir_all(&outside).ok();
             assert!(
@@ -3711,7 +3765,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("photo.png"), b"fake").unwrap();
 
-        let resolved = resolve_local_image_path("photo.png", &root, false);
+        let resolved = resolve_local_image_path("photo.png", &root, false, None);
         assert_eq!(resolved, Some(root.join("photo.png")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3724,7 +3778,7 @@ mod tests {
         std::fs::create_dir_all(&note_dir).unwrap();
         std::fs::write(root.join("photo.png"), b"fake").unwrap();
 
-        let resolved = resolve_local_image_path("photo.png", &note_dir, true);
+        let resolved = resolve_local_image_path("photo.png", &note_dir, true, None);
         assert_eq!(resolved, Some(root.join("photo.png")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3738,7 +3792,7 @@ mod tests {
         std::fs::write(root.join("photo.png"), b"fake").unwrap();
 
         // is_embed = false: a plain CommonMark image must NOT search ancestors.
-        let resolved = resolve_local_image_path("photo.png", &note_dir, false);
+        let resolved = resolve_local_image_path("photo.png", &note_dir, false, None);
         assert_eq!(resolved, None);
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3750,7 +3804,7 @@ mod tests {
         std::fs::create_dir_all(root.join("attachments")).unwrap();
         std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
 
-        let resolved = resolve_local_image_path("attachments/photo.png", &root, true);
+        let resolved = resolve_local_image_path("attachments/photo.png", &root, true, None);
         assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3764,7 +3818,7 @@ mod tests {
         let abs = "/etc/passwd";
         #[cfg(windows)]
         let abs = "C:\\Windows\\win.ini";
-        assert_eq!(resolve_local_image_path(abs, &root, true), None);
+        assert_eq!(resolve_local_image_path(abs, &root, true, None), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3772,7 +3826,10 @@ mod tests {
     fn resolve_local_image_path_rejects_parent_dir_traversal() {
         let root = temp_root("mdterm-image-rejectdotdot");
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(resolve_local_image_path("../secret.png", &root, true), None);
+        assert_eq!(
+            resolve_local_image_path("../secret.png", &root, true, None),
+            None
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3780,7 +3837,10 @@ mod tests {
     fn resolve_local_image_path_missing_file_returns_none() {
         let root = temp_root("mdterm-image-missing");
         std::fs::create_dir_all(&root).unwrap();
-        assert_eq!(resolve_local_image_path("nope.png", &root, true), None);
+        assert_eq!(
+            resolve_local_image_path("nope.png", &root, true, None),
+            None
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3793,7 +3853,7 @@ mod tests {
         std::fs::create_dir_all(root.join("attachments")).unwrap();
         std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
 
-        let resolved = resolve_local_image_path("attachments\\photo.png", &note_dir, true);
+        let resolved = resolve_local_image_path("attachments\\photo.png", &note_dir, true, None);
         assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -3812,7 +3872,7 @@ mod tests {
         std::fs::create_dir_all(root.join("attachments")).unwrap();
         std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
 
-        let resolved = resolve_local_image_path("attachments/photo.png", &note_dir, true);
+        let resolved = resolve_local_image_path("attachments/photo.png", &note_dir, true, None);
         assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3830,8 +3890,72 @@ mod tests {
         std::fs::write(mid_dir.join("photo.png"), b"near").unwrap();
         std::fs::create_dir_all(&note_dir).unwrap();
 
-        let resolved = resolve_local_image_path("photo.png", &note_dir, true);
+        let resolved = resolve_local_image_path("photo.png", &note_dir, true, None);
         assert_eq!(resolved, Some(mid_dir.join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_attachment_folder_found_in_base_dir() {
+        let root = temp_root("mdterm-image-attachfolder-basedir");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        let resolved = resolve_local_image_path("photo.png", &root, true, Some("attachments"));
+        assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_attachment_folder_found_in_ancestor_dir() {
+        // Reproduces the real-world case that motivated this option: a bare
+        // wikilink embed filename, with the actual file living in a shared
+        // `attachments/` folder several directories above the note.
+        let root = temp_root("mdterm-image-attachfolder-ancestor");
+        let note_dir = root.join("Notes").join("Daily").join("2026");
+        std::fs::create_dir_all(&note_dir).unwrap();
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        let resolved = resolve_local_image_path("photo.png", &note_dir, true, Some("attachments"));
+        assert_eq!(resolved, Some(root.join("attachments").join("photo.png")));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_attachment_folder_ignored_for_plain_images() {
+        let root = temp_root("mdterm-image-attachfolder-plain");
+        std::fs::create_dir_all(root.join("attachments")).unwrap();
+        std::fs::write(root.join("attachments").join("photo.png"), b"fake").unwrap();
+
+        // is_embed = false: attachment_folder_path must not apply to plain
+        // CommonMark images, only wikilink embeds.
+        let resolved = resolve_local_image_path("photo.png", &root, false, Some("attachments"));
+        assert_eq!(resolved, None);
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolve_local_image_path_attachment_folder_checked_before_ascending() {
+        // base_dir's own attachments/ match must win over a same-named file
+        // that's directly inside a nearer ancestor — attachment_folder is
+        // checked at each level before moving up, not only after exhausting
+        // direct matches everywhere.
+        let root = temp_root("mdterm-image-attachfolder-order");
+        let note_dir = root.join("notes");
+        std::fs::create_dir_all(note_dir.join("attachments")).unwrap();
+        std::fs::write(root.join("photo.png"), b"far").unwrap();
+        std::fs::write(note_dir.join("attachments").join("photo.png"), b"near").unwrap();
+
+        let resolved = resolve_local_image_path("photo.png", &note_dir, true, Some("attachments"));
+        assert_eq!(
+            resolved,
+            Some(note_dir.join("attachments").join("photo.png"))
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
