@@ -21,6 +21,12 @@ pub struct Config {
     /// images (`![](path)`) are unaffected.
     #[serde(default)]
     pub attachment_folder_path: Option<String>,
+    /// Command used to open the current file in an external program, e.g.
+    /// `"open -a Obsidian"` or `"notepad++"`. Split on whitespace; the
+    /// current file's path is appended as the final argument. Triggered by
+    /// Shift-O in the viewer.
+    #[serde(default)]
+    pub external_editor: Option<String>,
 }
 
 /// Which files the file picker will offer.
@@ -120,6 +126,7 @@ impl Default for Config {
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
             attachment_folder_path: None,
+            external_editor: None,
         }
     }
 }

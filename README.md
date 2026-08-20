@@ -43,6 +43,7 @@ vault in the terminal — and adds only the following on top:
 | Mermaid sequence diagrams | `sequenceDiagram` blocks get a real parser and renderer — participants, all arrow variants, activation shorthand, notes, nested `loop`/`alt`/`opt`/`par` — instead of being fed to the flowchart-only parser and rendering as scrambled one-word boxes |
 | `Shift+P` | Copies the current file's full canonicalized path to the clipboard |
 | Picker mouse click | Left-clicking a file-picker entry selects it and copies its full path to the clipboard |
+| `external_editor` / `Shift+O` | Opens the current file in a configured external program (e.g. Obsidian, TextEdit, Notepad++) |
 
 Nothing here is upstreamed yet. If any of it is useful to the original project, it should go
 there — the intent of this fork is personal use, not divergence.
@@ -159,6 +160,7 @@ mdviewer README.md | less -R
 | `Y` | Copy entire document to clipboard |
 | `c` | Copy nearest code block to clipboard |
 | `Shift+P` | Copy the current file's full path to clipboard |
+| `Shift+O` | Open the current file in an external program (set `external_editor` in config) |
 | `Tab` / `Shift+Tab` | Switch between files |
 | `h` / `?` / `F1` | Help screen |
 | `q` / `Ctrl+C` | Quit |
@@ -224,6 +226,7 @@ theme = "dark"        # "dark" or "light"
 line_numbers = false  # line numbers inside code blocks
 width = 0             # display width, 0 = auto-detect
 # attachment_folder_path = "attachments"  # extra subfolder checked when resolving ![[bare-filename]] embeds
+# external_editor = "open -a Obsidian"    # command Shift+O opens the current file with
 
 # Content that is parsed but never drawn.
 [hide]
@@ -328,6 +331,24 @@ tries `<dir>/<attachment_folder_path>/photo.png` before moving up to the next an
 ```toml
 attachment_folder_path = "attachments"
 ```
+
+### Opening the current file in an external program
+
+`Shift+O` opens the current file in whatever program `external_editor` names — useful for
+jumping out of mdviewer to edit the file you're reading:
+
+```toml
+external_editor = "open -a Obsidian"  # macOS: launch Obsidian
+# external_editor = "open -a TextEdit"
+# external_editor = "code"              # VS Code, if `code` is on PATH
+# external_editor = "notepad++"         # Windows
+```
+
+The command is split on whitespace, and the current file's path is appended as the final
+argument — so `"open -a Obsidian"` runs `open -a Obsidian <file>`. There's no quoting
+support, so program/argument names containing spaces (e.g. `"Visual Studio Code.exe"`)
+aren't supported this way. The program is spawned detached; mdviewer doesn't wait for it to
+exit. With nothing configured, `Shift+O` shows a toast pointing at this setting.
 
 Applies to wikilink embeds only (`![[...]]`) — plain CommonMark images (`![](path)`) are
 unaffected, same as the ancestor search itself.
