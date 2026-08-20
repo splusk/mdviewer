@@ -2242,29 +2242,73 @@ fn dispatch_link(state: &mut ViewerState, url: &str) {
     }
 }
 
+/// Percent-encode `input` for safe embedding as a single query-string value in
+/// a `{file}`-templated `external_editor` command (e.g. Obsidian's
+/// `obsidian://open?path={file}`, which requires even `/` escaped as `%2F`).
+/// Escapes every byte outside the URI "unreserved" set.
+fn percent_encode(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{:02X}", byte)),
+        }
+    }
+    out
+}
+
+/// Build the `(program, args)` to run for `external_editor`. Plain path-taking
+/// programs (TextEdit, Notepad++, `code`, ...) get the file path appended as
+/// the final, unencoded argument. A template containing `{file}` instead gets
+/// it substituted, percent-encoded, into every token that mentions it, with no
+/// separate trailing argument — needed for URI-based openers like Obsidian,
+/// which parse the file out of a single query-string token rather than taking
+/// it as a plain CLI argument. Returns `None` for a blank template.
+fn build_editor_command(template: &str, path: &Path) -> Option<(String, Vec<String>)> {
+    let uses_placeholder = template.contains("{file}");
+    let path_str = path.to_string_lossy();
+
+    let mut tokens: Vec<String> = if uses_placeholder {
+        let encoded_path = percent_encode(&path_str);
+        template
+            .split_whitespace()
+            .map(|part| part.replace("{file}", &encoded_path))
+            .collect()
+    } else {
+        template.split_whitespace().map(str::to_string).collect()
+    };
+
+    if tokens.is_empty() {
+        return None;
+    }
+    let program = tokens.remove(0);
+    if !uses_placeholder {
+        tokens.push(path_str.into_owned());
+    }
+    Some((program, tokens))
+}
+
 /// Open the current file in the user-configured external editor (`external_editor`
-/// in config.toml, e.g. `"open -a Obsidian"`). The command is split on whitespace
-/// and the current file's path is appended as the final argument, then spawned
-/// detached — the caller doesn't wait for the external program to exit.
+/// in config.toml), spawned detached — the caller doesn't wait for it to exit.
 fn open_in_external_editor(state: &mut ViewerState) {
     let Some(path) = state.current_file_path() else {
         state.set_toast("No file to open");
         return;
     };
+    let path = path.canonicalize().unwrap_or(path);
     let Some(command) = state.external_editor.as_ref() else {
         state.set_toast("No external editor configured (set external_editor in config.toml)");
         return;
     };
-
-    let mut parts = command.split_whitespace();
-    let Some(program) = parts.next() else {
+    let Some((program, args)) = build_editor_command(command, &path) else {
         state.set_toast("external_editor is empty in config.toml");
         return;
     };
 
-    let result = std::process::Command::new(program)
-        .args(parts)
-        .arg(&path)
+    let result = std::process::Command::new(&program)
+        .args(&args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
@@ -5283,6 +5327,43 @@ mod tests {
         assert_eq!(PathBuf::from(&state.filename), expected);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── build_editor_command / percent_encode tests ─────────────────────────
+
+    #[test]
+    fn percent_encode_escapes_slashes_spaces_and_unicode() {
+        assert_eq!(
+            percent_encode("/Users/shane/My Vault/café.md"),
+            "%2FUsers%2Fshane%2FMy%20Vault%2Fcaf%C3%A9.md"
+        );
+    }
+
+    #[test]
+    fn percent_encode_leaves_unreserved_characters_untouched() {
+        assert_eq!(percent_encode("a-Z_0.9~"), "a-Z_0.9~");
+    }
+
+    #[test]
+    fn build_editor_command_appends_raw_path_without_placeholder() {
+        let (program, args) =
+            build_editor_command("open -a TextEdit", Path::new("/tmp/My Note.md")).unwrap();
+        assert_eq!(program, "open");
+        assert_eq!(args, vec!["-a", "TextEdit", "/tmp/My Note.md"]);
+    }
+
+    #[test]
+    fn build_editor_command_substitutes_encoded_path_for_placeholder() {
+        let (program, args) =
+            build_editor_command("open obsidian://open?path={file}", Path::new("/tmp/a b.md"))
+                .unwrap();
+        assert_eq!(program, "open");
+        assert_eq!(args, vec!["obsidian://open?path=%2Ftmp%2Fa%20b.md"]);
+    }
+
+    #[test]
+    fn build_editor_command_returns_none_for_blank_template() {
+        assert!(build_editor_command("   ", Path::new("/tmp/a.md")).is_none());
     }
 
     // ── open_in_external_editor tests ───────────────────────────────────────
