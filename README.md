@@ -226,7 +226,7 @@ theme = "dark"        # "dark" or "light"
 line_numbers = false  # line numbers inside code blocks
 width = 0             # display width, 0 = auto-detect
 # attachment_folder_path = "attachments"  # extra subfolder checked when resolving ![[bare-filename]] embeds
-# external_editor = "open -a Obsidian"    # command Shift+O opens the current file with
+# external_editor = "open -a TextEdit"    # command Shift+O opens the current file with
 
 # Content that is parsed but never drawn.
 [hide]
@@ -338,17 +338,29 @@ attachment_folder_path = "attachments"
 jumping out of mdviewer to edit the file you're reading:
 
 ```toml
-external_editor = "open -a Obsidian"  # macOS: launch Obsidian
-# external_editor = "open -a TextEdit"
-# external_editor = "code"              # VS Code, if `code` is on PATH
-# external_editor = "notepad++"         # Windows
+external_editor = "open -a TextEdit"
+# external_editor = "code"                              # VS Code, if `code` is on PATH
+# external_editor = "notepad++"                          # Windows
+# external_editor = "open obsidian://open?path={file}"   # Obsidian — see below
 ```
 
-The command is split on whitespace, and the current file's path is appended as the final
-argument — so `"open -a Obsidian"` runs `open -a Obsidian <file>`. There's no quoting
+The command is split on whitespace. By default, the current file's path is appended as the
+final argument — so `"open -a TextEdit"` runs `open -a TextEdit <file>`. There's no quoting
 support, so program/argument names containing spaces (e.g. `"Visual Studio Code.exe"`)
 aren't supported this way. The program is spawned detached; mdviewer doesn't wait for it to
 exit. With nothing configured, `Shift+O` shows a toast pointing at this setting.
+
+**Obsidian is a special case**: unlike TextEdit or Notepad++, it doesn't accept an arbitrary
+file path as a plain argument — `open -a Obsidian <file>` only brings the app to the front
+without loading the file. Obsidian instead opens notes through its own `obsidian://` URI,
+which takes the file's path as a single, percent-encoded query-string value. Write `{file}`
+anywhere in the command to opt into this: mdviewer substitutes it with the current file's
+path, percent-encoded (even `/` becomes `%2F`, as Obsidian's URI scheme requires), and does
+**not** additionally append the path as a trailing argument:
+
+```toml
+external_editor = "open obsidian://open?path={file}"
+```
 
 Applies to wikilink embeds only (`![[...]]`) — plain CommonMark images (`![](path)`) are
 unaffected, same as the ancestor search itself.
