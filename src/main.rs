@@ -91,6 +91,7 @@ fn main() {
     hide.code_languages.extend(cli.hide_code_lang);
     let picker_config = config.picker;
     let attachment_folder_path = config.attachment_folder_path;
+    let external_editor = config.external_editor;
 
     let width = if cli.width > 0 {
         cli.width
@@ -175,6 +176,7 @@ fn main() {
             hide,
             picker: picker_config,
             attachment_folder_path,
+            external_editor,
         };
         if let Err(e) = viewer::run(opts) {
             eprintln!("Viewer error: {}", e);

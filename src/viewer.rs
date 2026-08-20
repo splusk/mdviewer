@@ -39,6 +39,7 @@ pub struct ViewerOptions {
     pub hide: HideConfig,
     pub picker: PickerConfig,
     pub attachment_folder_path: Option<String>,
+    pub external_editor: Option<String>,
 }
 
 pub fn run(opts: ViewerOptions) -> io::Result<()> {
@@ -326,6 +327,7 @@ struct ViewerState {
     width_override: Option<usize>,
     hide: HideConfig,
     picker: PickerConfig,
+    external_editor: Option<String>,
 
     // Mode
     mode: ViewMode,
@@ -454,6 +456,7 @@ impl ViewerState {
             width_override: opts.width_override,
             hide: opts.hide,
             picker: opts.picker.clone(),
+            external_editor: opts.external_editor,
             search: SearchState::new(),
             toc_entries: Vec::new(),
             toc_selected: 0,
@@ -1979,6 +1982,11 @@ fn handle_normal(state: &mut ViewerState, code: KeyCode, mods: KeyModifiers) -> 
             }
         }
 
+        // Open in external editor
+        KeyCode::Char('O') => {
+            open_in_external_editor(state);
+        }
+
         // Code block copy
         KeyCode::Char('c') => {
             if let Some(block_id) = state.find_code_block_at_offset()
@@ -2231,6 +2239,39 @@ fn dispatch_link(state: &mut ViewerState, url: &str) {
         navigate_to_resolved(state, resolved, url);
     } else {
         state.set_toast(format!("Blocked: unsupported URL scheme in '{}'", url));
+    }
+}
+
+/// Open the current file in the user-configured external editor (`external_editor`
+/// in config.toml, e.g. `"open -a Obsidian"`). The command is split on whitespace
+/// and the current file's path is appended as the final argument, then spawned
+/// detached — the caller doesn't wait for the external program to exit.
+fn open_in_external_editor(state: &mut ViewerState) {
+    let Some(path) = state.current_file_path() else {
+        state.set_toast("No file to open");
+        return;
+    };
+    let Some(command) = state.external_editor.as_ref() else {
+        state.set_toast("No external editor configured (set external_editor in config.toml)");
+        return;
+    };
+
+    let mut parts = command.split_whitespace();
+    let Some(program) = parts.next() else {
+        state.set_toast("external_editor is empty in config.toml");
+        return;
+    };
+
+    let result = std::process::Command::new(program)
+        .args(parts)
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    match result {
+        Ok(_) => state.set_toast(format!("Opened in {}", program)),
+        Err(e) => state.set_toast(format!("Failed to open external editor: {}", e)),
     }
 }
 
@@ -4314,6 +4355,7 @@ pub(crate) fn help_sections() -> &'static [HelpSection] {
                 ("click", "Copy heading section, list, or code block"),
                 ("Y", "Copy full document to clipboard"),
                 ("P", "Copy full file path to clipboard"),
+                ("O", "Open in external editor"),
                 ("c", "Copy nearest code block"),
                 ("t", "Toggle dark / light theme"),
                 ("l", "Toggle line numbers in code blocks"),
@@ -5009,6 +5051,7 @@ mod tests {
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
             attachment_folder_path: None,
+            external_editor: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.wrapped = lines;
@@ -5186,6 +5229,7 @@ mod tests {
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
             attachment_folder_path: None,
+            external_editor: None,
         };
         ViewerState::new(opts, 80, 24)
     }
@@ -5209,6 +5253,7 @@ mod tests {
             hide: HideConfig::default(),
             picker: PickerConfig::default(),
             attachment_folder_path: None,
+            external_editor: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.rebuild();
@@ -5237,6 +5282,100 @@ mod tests {
         let expected = target.canonicalize().unwrap();
         assert_eq!(PathBuf::from(&state.filename), expected);
 
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    // ── open_in_external_editor tests ───────────────────────────────────────
+
+    #[test]
+    fn open_in_external_editor_without_a_file_shows_toast() {
+        let mut state = make_state_with_lines(vec![]);
+        state.external_editor = Some("open".to_string());
+
+        open_in_external_editor(&mut state);
+
+        assert_eq!(state.toast.unwrap().0, "No file to open");
+    }
+
+    #[test]
+    fn open_in_external_editor_without_config_shows_toast() {
+        let root = wikilink_temp_root("mdterm-viewer-external-editor-unconfigured");
+        std::fs::create_dir_all(&root).unwrap();
+        let current = root.join("note.md");
+        std::fs::write(&current, "# Note").unwrap();
+
+        let mut state = wikilink_test_state(&current);
+        state.external_editor = None;
+
+        open_in_external_editor(&mut state);
+
+        assert_eq!(
+            state.toast.unwrap().0,
+            "No external editor configured (set external_editor in config.toml)"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_in_external_editor_with_blank_command_shows_toast() {
+        let root = wikilink_temp_root("mdterm-viewer-external-editor-blank");
+        std::fs::create_dir_all(&root).unwrap();
+        let current = root.join("note.md");
+        std::fs::write(&current, "# Note").unwrap();
+
+        let mut state = wikilink_test_state(&current);
+        state.external_editor = Some("   ".to_string());
+
+        open_in_external_editor(&mut state);
+
+        assert_eq!(
+            state.toast.unwrap().0,
+            "external_editor is empty in config.toml"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_in_external_editor_reports_spawn_failure() {
+        let root = wikilink_temp_root("mdterm-viewer-external-editor-missing-program");
+        std::fs::create_dir_all(&root).unwrap();
+        let current = root.join("note.md");
+        std::fs::write(&current, "# Note").unwrap();
+
+        let mut state = wikilink_test_state(&current);
+        // Trailing args exercise command-splitting even though the program
+        // itself doesn't exist.
+        state.external_editor = Some("mdviewer-test-nonexistent-editor -a Foo".to_string());
+
+        open_in_external_editor(&mut state);
+
+        let toast = state.toast.unwrap().0;
+        assert!(
+            toast.starts_with("Failed to open external editor:"),
+            "unexpected toast: {toast}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn open_in_external_editor_spawns_configured_command() {
+        // `CARGO` is set by `cargo test` to the absolute path of the cargo
+        // binary used to build/run the tests — a real, cross-platform
+        // executable guaranteed to be present without depending on any
+        // particular OS shell builtin (`true`, `echo`, etc. differ per OS).
+        let cargo = env!("CARGO");
+        let root = wikilink_temp_root("mdterm-viewer-external-editor-success");
+        std::fs::create_dir_all(&root).unwrap();
+        let current = root.join("note.md");
+        std::fs::write(&current, "# Note").unwrap();
+
+        let mut state = wikilink_test_state(&current);
+        state.external_editor = Some(format!("{cargo} --version"));
+
+        open_in_external_editor(&mut state);
+
+        let toast = state.toast.unwrap().0;
+        assert!(toast.starts_with("Opened in"), "unexpected toast: {toast}");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
