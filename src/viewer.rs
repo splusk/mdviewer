@@ -40,6 +40,8 @@ pub struct ViewerOptions {
     pub picker: PickerConfig,
     pub attachment_folder_path: Option<String>,
     pub external_editor: Option<String>,
+    /// `+N` / `--line N`: source line to open at, applied to the first file.
+    pub jump_line: Option<usize>,
 }
 
 pub fn run(opts: ViewerOptions) -> io::Result<()> {
@@ -400,6 +402,15 @@ struct ViewerState {
 
     // Cached parsed JSON value (avoids re-parsing on every rebuild)
     cached_json: Option<serde_json::Value>,
+
+    // `+N` target not yet applied; consumed by the first layout that can
+    // resolve it to a row.
+    pending_jump: Option<usize>,
+
+    // Source line the jump landed on, kept so the highlight survives re-wrap
+    // and auto-reload; cleared on the first key or scroll.
+    highlight_line: Option<usize>,
+    highlight_row: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -489,6 +500,9 @@ impl ViewerState {
             nav_history: Vec::new(),
             json_view: None,
             cached_json: None,
+            pending_jump: opts.jump_line,
+            highlight_line: None,
+            highlight_row: None,
             mode: if opts.start_in_picker {
                 ViewMode::FilePicker
             } else {
@@ -788,7 +802,62 @@ impl ViewerState {
 
         self.finalize_layout();
         self.offset = saved_offset.min(self.max_offset());
+        self.apply_pending_jump();
         self.dirty = true;
+    }
+
+    /// First rendered row that covers source line `target`, or the row after
+    /// it when `target` rendered nothing (hidden code block, stripped
+    /// frontmatter, hidden image). Never a row before it. Falls back to the
+    /// end of the document when `target` is past the last rendered content.
+    fn row_for_source_line(&self, target: usize) -> Option<usize> {
+        if self.wrapped.is_empty() {
+            return None;
+        }
+        Some(
+            self.wrapped
+                .iter()
+                .position(|l| l.source_end >= target)
+                .unwrap_or(self.wrapped.len() - 1),
+        )
+    }
+
+    fn apply_pending_jump(&mut self) {
+        // JSON renders from a parsed value with no source spans, so `+N` has
+        // nothing to resolve against.
+        if self.json_view.is_some() {
+            self.pending_jump = None;
+            return;
+        }
+        if let Some(target) = self.pending_jump.take()
+            && let Some(row) = self.row_for_source_line(target)
+        {
+            self.highlight_line = Some(target);
+            if self.slide_mode {
+                self.current_slide = self
+                    .slide_boundaries
+                    .partition_point(|&b| b <= row)
+                    .saturating_sub(1);
+            } else {
+                let vp = self.viewport();
+                self.offset = row.saturating_sub(vp / 3).min(self.max_offset());
+            }
+        }
+        self.refresh_highlight_row();
+    }
+
+    fn refresh_highlight_row(&mut self) {
+        self.highlight_row = self
+            .highlight_line
+            .and_then(|target| self.row_for_source_line(target));
+    }
+
+    fn clear_highlight(&mut self) {
+        if self.highlight_line.is_some() {
+            self.highlight_line = None;
+            self.highlight_row = None;
+            self.dirty = true;
+        }
     }
 
     /// Adjust image placeholder rows to match actual dimensions, then rebuild
@@ -814,6 +883,8 @@ impl ViewerState {
             {
                 let url = url.clone();
                 let alt = alt.clone();
+                let (src_start, src_end) =
+                    (self.wrapped[i].source_line, self.wrapped[i].source_end);
                 // Use ideal rows if image loaded, otherwise 3 placeholder rows
                 let actual_rows = if self.image_cache.has_image(&url) {
                     self.image_cache.ideal_rows(&url, cw).unwrap_or(total_rows)
@@ -836,6 +907,8 @@ impl ViewerState {
                             row: r,
                             total_rows: actual_rows,
                         },
+                        source_line: src_start,
+                        source_end: src_end,
                     });
                 }
                 // Skip the original placeholder rows
@@ -936,6 +1009,7 @@ impl ViewerState {
 
         let max = self.max_offset();
         self.offset = self.offset.min(max);
+        self.refresh_highlight_row();
     }
 
     /// Drain the notify channel and reload the file if it changed on disk.
@@ -1201,6 +1275,7 @@ fn close_help(state: &mut ViewerState) {
 fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
     match ev {
         Event::Key(ke) if ke.kind == KeyEventKind::Press => {
+            state.clear_highlight();
             if ke.code == KeyCode::Char('c') && ke.modifiers.contains(KeyModifiers::CONTROL) {
                 return true;
             }
@@ -1314,6 +1389,7 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
         }
         Event::Mouse(me) => match me.kind {
             MouseEventKind::ScrollDown => {
+                state.clear_highlight();
                 let prev_offset = state.offset;
                 let prev_slide = state.current_slide;
                 let prev_help = state.help_scroll;
@@ -1360,6 +1436,7 @@ fn handle_event(state: &mut ViewerState, ev: Event) -> bool {
                 }
             }
             MouseEventKind::ScrollUp => {
+                state.clear_highlight();
                 let prev_offset = state.offset;
                 let prev_slide = state.current_slide;
                 let prev_help = state.help_scroll;
@@ -3144,12 +3221,15 @@ fn render_frame(stdout: &mut impl Write, state: &mut ViewerState) -> io::Result<
                         jv.cursor_line()
                     })
                     .is_some_and(|cl| cl == line_idx);
+                let is_jump_row = state.highlight_row == Some(line_idx);
                 let line_bg = if is_json_cursor {
                     theme.overlay_selected_bg
+                } else if is_jump_row {
+                    theme.search_match_bg
                 } else {
                     theme.bg
                 };
-                if is_json_cursor {
+                if is_json_cursor || is_jump_row {
                     queue!(stdout, SetBackgroundColor(line_bg))?;
                 }
 
@@ -3172,7 +3252,7 @@ fn render_frame(stdout: &mut impl Write, state: &mut ViewerState) -> io::Result<
                     col += UnicodeWidthStr::width(span.text.as_str());
                 }
                 if col < content_width {
-                    let fill_bg = if is_json_cursor {
+                    let fill_bg = if is_json_cursor || is_jump_row {
                         Some(line_bg)
                     } else {
                         line.spans
@@ -3192,7 +3272,7 @@ fn render_frame(stdout: &mut impl Write, state: &mut ViewerState) -> io::Result<
                         queue!(stdout, Print(" ".repeat(content_width - col)))?;
                     }
                 }
-                if is_json_cursor {
+                if is_json_cursor || is_jump_row {
                     queue!(stdout, SetBackgroundColor(theme.bg))?;
                 }
             }
@@ -5096,6 +5176,7 @@ mod tests {
             picker: PickerConfig::default(),
             attachment_folder_path: None,
             external_editor: None,
+            jump_line: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.wrapped = lines;
@@ -5116,6 +5197,7 @@ mod tests {
         Line {
             spans,
             meta: LineMeta::None,
+            ..Default::default()
         }
     }
 
@@ -5274,6 +5356,7 @@ mod tests {
             picker: PickerConfig::default(),
             attachment_folder_path: None,
             external_editor: None,
+            jump_line: None,
         };
         ViewerState::new(opts, 80, 24)
     }
@@ -5298,6 +5381,7 @@ mod tests {
             picker: PickerConfig::default(),
             attachment_folder_path: None,
             external_editor: None,
+            jump_line: None,
         };
         let mut state = ViewerState::new(opts, 80, 24);
         state.rebuild();
@@ -5548,6 +5632,212 @@ mod tests {
         assert_eq!(
             display_link_url("https://example.com"),
             "https://example.com"
+        );
+    }
+
+    // ── Line jump (+N) ──────────────────────────────────────────────────────
+
+    /// Build a state whose `wrapped` lines come from a real render of `src`.
+    fn make_state_from_source(src: &str, hide: HideConfig, jump: Option<usize>) -> ViewerState {
+        let opts = ViewerOptions {
+            files: vec![],
+            initial_content: src.to_string(),
+            filename: "test.md".to_string(),
+            theme: crate::theme::Theme::dark(),
+            slide_mode: false,
+            line_numbers: false,
+            width_override: Some(40),
+            picker_root: None,
+            start_in_picker: false,
+            hide: hide.clone(),
+            picker: PickerConfig::default(),
+            attachment_folder_path: None,
+            external_editor: None,
+            jump_line: jump,
+        };
+        let mut state = ViewerState::new(opts, 44, 24);
+        let theme = crate::theme::Theme::dark();
+        let (lines, _) = crate::markdown::render(src, 40, &theme, false, &hide);
+        state.wrapped = wrap_lines(&lines, 40);
+        state
+    }
+
+    fn row_text(state: &ViewerState, row: usize) -> String {
+        state.wrapped[row]
+            .spans
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
+    /// Every hazard at once: frontmatter, a wikilink, a paragraph long enough
+    /// to wrap, a hidden dataviewjs block, a task list and CRLF line endings.
+    const HAZARDS: &str = "---\r\ntitle: t\r\ntags: [a]\r\n---\r\n# Heading one\r\n\r\nA paragraph that starts on line seven and is long enough to wrap over several rendered rows at this width.\r\n\r\n```dataviewjs\r\nhidden_one()\r\nhidden_two()\r\n```\r\n\r\n- [ ] task with a [[wikilink]] in it\r\n- [x] done\r\n\r\n## Heading two\r\n\r\nFinal paragraph on line nineteen.\r\n";
+
+    fn hazard_hide() -> HideConfig {
+        HideConfig {
+            frontmatter: true,
+            code_languages: vec!["dataviewjs".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn jump_lands_on_the_row_holding_the_target_line() {
+        let state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        let row = state.row_for_source_line(5).unwrap();
+        assert_eq!(row_text(&state, row), "Heading one");
+    }
+
+    #[test]
+    fn jump_into_a_wrapped_paragraph_lands_on_its_first_row() {
+        let state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        let row = state.row_for_source_line(7).unwrap();
+        assert!(
+            row_text(&state, row).starts_with("A paragraph that starts"),
+            "landed on {:?}",
+            row_text(&state, row)
+        );
+    }
+
+    #[test]
+    fn jump_into_hidden_content_lands_after_it_never_before() {
+        let state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        // Lines 10-12 are inside the hidden dataviewjs block.
+        for target in [10, 11, 12] {
+            let row = state.row_for_source_line(target).unwrap();
+            assert!(
+                row_text(&state, row).contains("task with a"),
+                "+{target} landed on {:?}",
+                row_text(&state, row)
+            );
+        }
+    }
+
+    #[test]
+    fn jump_into_stripped_frontmatter_lands_on_the_first_rendered_row() {
+        let state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        let row = state.row_for_source_line(2).unwrap();
+        assert_eq!(row_text(&state, row), "Heading one");
+    }
+
+    #[test]
+    fn jump_past_the_end_lands_at_the_end_of_the_document() {
+        let state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        let row = state.row_for_source_line(99999).unwrap();
+        assert_eq!(row, state.wrapped.len() - 1);
+    }
+
+    #[test]
+    fn jump_lands_a_third_of_the_way_down_with_context_above() {
+        // A document taller than the viewport, so the landing offset is not
+        // pinned to zero by the end-of-document clamp.
+        let src: String = (1..=60).map(|n| format!("para {n}\n\n")).collect();
+        let mut state = make_state_from_source(&src, HideConfig::default(), None);
+        state.pending_jump = Some(81); // "para 41"
+        state.apply_pending_jump();
+        let row = state.row_for_source_line(81).unwrap();
+        let viewport = state.viewport();
+        assert_eq!(row_text(&state, row), "para 41");
+        assert_eq!(state.offset, row - viewport / 3);
+        assert!(
+            row > state.offset && row < state.offset + viewport,
+            "the target row must be on screen with context above it"
+        );
+    }
+
+    #[test]
+    fn jump_marks_the_landed_row_until_the_next_key() {
+        let mut state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        state.pending_jump = Some(19);
+        state.apply_pending_jump();
+        assert_eq!(state.highlight_row, state.row_for_source_line(19));
+        state.clear_highlight();
+        assert_eq!(state.highlight_row, None);
+        assert_eq!(state.highlight_line, None);
+    }
+
+    #[test]
+    fn the_highlight_survives_a_rewrap() {
+        let mut state = make_state_from_source(HAZARDS, hazard_hide(), None);
+        state.pending_jump = Some(19);
+        state.apply_pending_jump();
+        let before = row_text(&state, state.highlight_row.unwrap());
+        // Re-wrap at a narrower width, as a terminal resize would.
+        let theme = crate::theme::Theme::dark();
+        let (lines, _) = crate::markdown::render(HAZARDS, 24, &theme, false, &hazard_hide());
+        state.wrapped = wrap_lines(&lines, 24);
+        state.refresh_highlight_row();
+        let after = row_text(&state, state.highlight_row.unwrap());
+        assert!(
+            before.starts_with(&after[..after.len().min(10)]),
+            "highlight moved from {before:?} to {after:?}"
+        );
+    }
+
+    #[test]
+    fn slide_mode_jump_selects_the_slide_holding_the_line() {
+        let src = "# One\n\nfirst slide\n\n---\n\n# Two\n\nsecond slide\n\n---\n\n# Three\n\nthird slide\n";
+        let mut state = make_state_from_source(src, HideConfig::default(), None);
+        state.slide_mode = true;
+        state.slide_boundaries.clear();
+        state.slide_boundaries.push(0);
+        for (i, line) in state.wrapped.iter().enumerate() {
+            if matches!(line.meta, LineMeta::SlideBreak) {
+                state.slide_boundaries.push(i + 1);
+            }
+        }
+        assert_eq!(state.slide_boundaries.len(), 3, "expected three slides");
+        // Line 13 is "# Three", on the last slide.
+        state.pending_jump = Some(13);
+        state.apply_pending_jump();
+        assert_eq!(state.current_slide, 2);
+    }
+
+    #[test]
+    fn json_ignores_a_line_jump() {
+        let mut state = make_state_from_source("# md\n", HideConfig::default(), Some(1));
+        state.json_view = Some(crate::json::JsonViewState::new());
+        state.offset = 5;
+        state.apply_pending_jump();
+        assert_eq!(state.offset, 5, "the offset must not move for JSON");
+        assert_eq!(state.highlight_row, None);
+        assert_eq!(state.pending_jump, None);
+    }
+
+    // ── Task toggling under frontmatter hiding (R1 regression) ──────────────
+
+    #[test]
+    fn toggling_a_task_with_frontmatter_hidden_edits_the_right_checkbox() {
+        let source = "---\ntitle: t\ntags: [a]\n---\n\n- [ ] alpha\n- [ ] beta\n";
+        let hide = HideConfig {
+            frontmatter: true,
+            ..Default::default()
+        };
+        let theme = crate::theme::Theme::dark();
+        let (lines, _) = crate::markdown::render(source, 40, &theme, false, &hide);
+        let offsets: Vec<(usize, bool)> = lines
+            .iter()
+            .filter_map(|l| match l.meta {
+                LineMeta::TaskItem {
+                    bracket_offset,
+                    checked,
+                    ..
+                } => Some((bracket_offset, checked)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets.len(), 2);
+
+        let mut state = make_state_from_source(source, hide, None);
+        state.files = vec![String::new()]; // no file on disk; edit in memory only
+        let (beta_offset, beta_checked) = offsets[1];
+        state.toggle_task(beta_offset, beta_checked);
+        assert_eq!(
+            state.content, "---\ntitle: t\ntags: [a]\n---\n\n- [ ] alpha\n- [x] beta\n",
+            "the second checkbox should have been the one toggled"
         );
     }
 }

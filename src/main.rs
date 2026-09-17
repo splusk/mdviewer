@@ -65,10 +65,45 @@ struct Cli {
     /// Omit fenced code blocks with this language (repeatable), e.g. dataviewjs
     #[arg(long, value_name = "LANG")]
     hide_code_lang: Vec<String>,
+
+    /// Open scrolled to this source line (also accepted as vim-style `+N`)
+    #[arg(long = "line", short = 'L', value_name = "N")]
+    line: Option<usize>,
+}
+
+/// Pull vim-style `+N` out of argv before clap sees it, since clap would take
+/// it for a filename. Only `+` followed by digits counts, so a file actually
+/// named `+foo` still opens, and nothing after `--` is touched.
+fn take_line_arg(args: &mut Vec<String>) -> Option<usize> {
+    let mut line = None;
+    let mut past_separator = false;
+    args.retain(|arg| {
+        if past_separator {
+            return true;
+        }
+        if arg == "--" {
+            past_separator = true;
+            return true;
+        }
+        match arg.strip_prefix('+') {
+            Some(rest) if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) => {
+                // Out-of-range digits clamp rather than panic; the viewer
+                // treats anything past the last line as end of document.
+                line = Some(rest.parse::<usize>().unwrap_or(usize::MAX));
+                false
+            }
+            _ => true,
+        }
+    });
+    line
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let mut args: Vec<String> = std::env::args().collect();
+    let plus_line = take_line_arg(&mut args);
+    let cli = Cli::parse_from(args);
+    // `+0` and `--line 0` mean the top of the file, same as line 1.
+    let jump_line = plus_line.or(cli.line).map(|n| n.max(1));
     let config = config::Config::load();
     let stdout_is_terminal = io::stdout().is_terminal();
     let stdin_is_terminal = io::stdin().is_terminal();
@@ -177,6 +212,9 @@ fn main() {
             picker: picker_config,
             attachment_folder_path,
             external_editor,
+            // JSON renders from a parsed value with no source spans, so there
+            // is nothing for `+N` to resolve against.
+            jump_line: if is_json { None } else { jump_line },
         };
         if let Err(e) = viewer::run(opts) {
             eprintln!("Viewer error: {}", e);

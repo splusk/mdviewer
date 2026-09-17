@@ -56,6 +56,12 @@ pub enum LineMeta {
 pub struct Line {
     pub spans: Vec<StyledSpan>,
     pub meta: LineMeta,
+    /// 1-based first source line of the block this row came from (0 = unknown).
+    pub source_line: usize,
+    /// 1-based last source line of that block. A block that spans several
+    /// source lines gives every row it renders to the same pair, so a jump
+    /// to any line inside it resolves to the block's first row.
+    pub source_end: usize,
 }
 
 impl Line {
@@ -63,6 +69,7 @@ impl Line {
         Line {
             spans: vec![],
             meta: LineMeta::None,
+            ..Default::default()
         }
     }
 
@@ -111,6 +118,7 @@ pub fn wrap_lines(lines: &[Line], width: usize) -> Vec<Line> {
             let content_line = Line {
                 spans: line.spans.iter().skip(1).cloned().collect(),
                 meta: LineMeta::None,
+                ..Default::default()
             };
             let wrapped = word_wrap(&content_line, inner_width);
             let prefix_span = StyledSpan {
@@ -120,6 +128,8 @@ pub fn wrap_lines(lines: &[Line], width: usize) -> Vec<Line> {
             for mut w in wrapped {
                 w.spans.insert(0, prefix_span.clone());
                 w.meta = line.meta.clone();
+                w.source_line = line.source_line;
+                w.source_end = line.source_end;
                 result.push(w);
             }
         } else {
@@ -137,6 +147,12 @@ pub fn wrap_lines(lines: &[Line], width: usize) -> Vec<Line> {
                 }
             } else if let Some(first) = wrapped.first_mut() {
                 first.meta = line.meta.clone();
+            }
+            // Source lines go on every fragment, not just the first, so a jump
+            // never falls into a hole between wrapped rows.
+            for w in &mut wrapped {
+                w.source_line = line.source_line;
+                w.source_end = line.source_end;
             }
             result.extend(wrapped);
         }
@@ -187,6 +203,7 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
             lines.push(Line {
                 spans: std::mem::take(&mut current),
                 meta: LineMeta::None,
+                ..Default::default()
             });
             col = 0;
         }
@@ -219,6 +236,7 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
                     lines.push(Line {
                         spans: std::mem::take(&mut current),
                         meta: LineMeta::None,
+                        ..Default::default()
                     });
                     col = 0;
                 }
@@ -237,6 +255,7 @@ fn word_wrap(line: &Line, width: usize) -> Vec<Line> {
         lines.push(Line {
             spans: current,
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 
@@ -259,6 +278,7 @@ mod tests {
                 style: Style::default(),
             }],
             meta: LineMeta::None,
+            ..Default::default()
         }
     }
 
@@ -457,6 +477,7 @@ mod tests {
                 },
             ],
             meta: LineMeta::None,
+            ..Default::default()
         };
         // Width 10 should force a wrap within the second span
         let wrapped = wrap_lines(&[line], 10);
@@ -499,6 +520,7 @@ mod tests {
                 },
             ],
             meta: LineMeta::None,
+            ..Default::default()
         };
         let wrapped = wrap_lines(&[line], 30);
         assert!(wrapped.len() >= 2, "blockquote should wrap");
@@ -541,6 +563,7 @@ mod tests {
                 text: "a heading inside a blockquote that is long enough to wrap around"
                     .to_string(),
             },
+            ..Default::default()
         };
         let wrapped = wrap_lines(&[line], 30);
         assert!(wrapped.len() >= 2, "blockquote heading should wrap");
@@ -574,8 +597,73 @@ mod tests {
                 },
             ],
             meta: LineMeta::None,
+            ..Default::default()
         };
         let wrapped = wrap_lines(&[line], 80);
         assert_eq!(wrapped.len(), 1);
+    }
+
+    // ── Source line propagation through wrapping (R2) ───────────────────────
+
+    fn sourced_line(text: &str, start: usize, end: usize) -> Line {
+        Line {
+            source_line: start,
+            source_end: end,
+            ..plain_line(text)
+        }
+    }
+
+    #[test]
+    fn every_wrapped_fragment_keeps_the_source_line() {
+        let line = sourced_line(
+            "one two three four five six seven eight nine ten eleven twelve",
+            10,
+            10,
+        );
+        let wrapped = wrap_lines(&[line], 12);
+        assert!(
+            wrapped.len() >= 5,
+            "expected several rows, got {}",
+            wrapped.len()
+        );
+        for (i, w) in wrapped.iter().enumerate() {
+            assert_eq!(w.source_line, 10, "row {i} lost its source line");
+            assert_eq!(w.source_end, 10, "row {i} lost its source end");
+        }
+    }
+
+    #[test]
+    fn wrapped_blockquote_fragments_keep_the_source_line() {
+        let line = Line {
+            spans: vec![
+                StyledSpan {
+                    text: BLOCKQUOTE_PREFIX.to_string(),
+                    style: Style::default(),
+                },
+                StyledSpan {
+                    text: "quoted text that is long enough to need wrapping across rows"
+                        .to_string(),
+                    style: Style::default(),
+                },
+            ],
+            meta: LineMeta::None,
+            source_line: 7,
+            source_end: 9,
+        };
+        let wrapped = wrap_lines(&[line], 20);
+        assert!(wrapped.len() > 1);
+        for (i, w) in wrapped.iter().enumerate() {
+            assert_eq!(
+                (w.source_line, w.source_end),
+                (7, 9),
+                "row {i} lost its range"
+            );
+        }
+    }
+
+    #[test]
+    fn unwrapped_lines_keep_their_source_line() {
+        let wrapped = wrap_lines(&[sourced_line("short", 3, 3)], 80);
+        assert_eq!((wrapped[0].source_line, wrapped[0].source_end), (3, 3));
     }
 }
