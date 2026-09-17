@@ -44,6 +44,7 @@ vault in the terminal — and adds only the following on top:
 | `Shift+P` | Copies the current file's full canonicalized path to the clipboard |
 | Picker mouse click | Left-clicking a file-picker entry selects it and copies its full path to the clipboard |
 | `external_editor` / `Shift+O` | Opens the current file in a configured external program (e.g. Obsidian, TextEdit, Notepad++) |
+| `+N` / `--line N` | Opens the file scrolled to source line `N`, so a grep hit can be opened where it matched. Line numbers are the file's own, counting any frontmatter that is being hidden |
 
 Nothing here is upstreamed yet. If any of it is useful to the original project, it should go
 there — the intent of this fork is personal use, not divergence.
@@ -110,7 +111,26 @@ mdviewer --slides deck.md             # slide mode
 mdviewer --export html doc.md > out.html  # export to HTML
 mdviewer --theme light README.md      # light theme
 mdviewer -l README.md                 # line numbers in code blocks
+mdviewer +42 README.md                # open scrolled to line 42
 ```
+
+### Opening at a line
+
+`+N` (vim-style) and `--line N` open the file at source line `N`, for jumping
+straight to a grep hit:
+
+```bash
+mdviewer +42 notes.md
+rg -n TODO notes.md | head -1        # notes.md:42:- [ ] TODO ...
+```
+
+The landed row sits a third of the way down the screen with a highlight over
+it, cleared by the first key press or scroll. Line numbers always count from
+the top of the file, including frontmatter that `--no-frontmatter` is hiding.
+When line `N` renders nothing at all — it sits inside a hidden `dataviewjs`
+block, hidden frontmatter, or a skipped image — the view lands on the first
+rendered line *after* it, never before it. `+N` is ignored for JSON files,
+piped output and `--export`.
 
 When piped, mdviewer outputs styled text without the interactive viewer:
 
@@ -390,6 +410,7 @@ Options:
       --no-frontmatter     Skip a leading YAML frontmatter block
       --hide-code-lang <LANG>
                            Omit fenced code blocks with this language (repeatable)
+  -L, --line <N>           Open scrolled to this source line (also accepted as `+N`)
   -h, --help               Print help
   -V, --version            Print version
 ```

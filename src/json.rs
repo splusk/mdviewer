@@ -142,6 +142,7 @@ fn make_kv_line(theme: &Theme, key: &str, value: &Value, depth: usize, align_wid
     Line {
         spans,
         meta: LineMeta::None,
+        ..Default::default()
     }
 }
 
@@ -161,6 +162,7 @@ fn make_bullet_line(theme: &Theme, value: &Value, depth: usize) -> Line {
             make_value_span(theme, value),
         ],
         meta: LineMeta::None,
+        ..Default::default()
     }
 }
 
@@ -176,6 +178,7 @@ fn make_indexed_value_line(theme: &Theme, index: usize, value: &Value, depth: us
             make_value_span(theme, value),
         ],
         meta: LineMeta::None,
+        ..Default::default()
     }
 }
 
@@ -191,6 +194,7 @@ fn make_indented_value_line(theme: &Theme, value: &Value, depth: usize) -> Line 
             make_value_span(theme, value),
         ],
         meta: LineMeta::None,
+        ..Default::default()
     }
 }
 
@@ -274,6 +278,7 @@ fn build_table_lines(theme: &Theme, arr: &[Value], indent: &str, available: usiz
             style: style_fg(bc),
         }],
         meta: LineMeta::None,
+        ..Default::default()
     });
 
     // Header row
@@ -304,6 +309,7 @@ fn build_table_lines(theme: &Theme, arr: &[Value], indent: &str, available: usiz
     lines.push(Line {
         spans: hdr,
         meta: LineMeta::None,
+        ..Default::default()
     });
 
     // Header separator
@@ -318,6 +324,7 @@ fn build_table_lines(theme: &Theme, arr: &[Value], indent: &str, available: usiz
             style: style_fg(bc),
         }],
         meta: LineMeta::None,
+        ..Default::default()
     });
 
     // Data rows
@@ -346,6 +353,7 @@ fn build_table_lines(theme: &Theme, arr: &[Value], indent: &str, available: usiz
         lines.push(Line {
             spans,
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 
@@ -361,6 +369,7 @@ fn build_table_lines(theme: &Theme, arr: &[Value], indent: &str, available: usiz
             style: style_fg(bc),
         }],
         meta: LineMeta::None,
+        ..Default::default()
     });
 
     lines
@@ -726,6 +735,7 @@ impl<'a> JsonRenderer<'a> {
         self.lines.push(Line {
             spans: vec![],
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 
@@ -751,6 +761,7 @@ impl<'a> JsonRenderer<'a> {
                 style: style_fg(self.theme.json_bracket),
             }],
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 
@@ -772,6 +783,7 @@ impl<'a> JsonRenderer<'a> {
                 },
             ],
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 
@@ -781,7 +793,11 @@ impl<'a> JsonRenderer<'a> {
     }
 
     fn push_line(&mut self, spans: Vec<StyledSpan>, meta: LineMeta) {
-        self.lines.push(Line { spans, meta });
+        self.lines.push(Line {
+            spans,
+            meta,
+            ..Default::default()
+        });
     }
 }
 
@@ -1002,12 +1018,20 @@ impl<'a> CardRenderer<'a> {
 
     /// Push a line directly (not subject to card wrapping).
     fn push_line_raw(&mut self, spans: Vec<StyledSpan>, meta: LineMeta) {
-        self.lines.push(Line { spans, meta });
+        self.lines.push(Line {
+            spans,
+            meta,
+            ..Default::default()
+        });
     }
 
     /// Push a content line (will be wrapped by close_card).
     fn push_line(&mut self, spans: Vec<StyledSpan>, meta: LineMeta) {
-        self.lines.push(Line { spans, meta });
+        self.lines.push(Line {
+            spans,
+            meta,
+            ..Default::default()
+        });
     }
 
     // ── root rendering ────────────────────────────────────────
@@ -2144,6 +2168,7 @@ pub fn render_diagram(
         lines.push(Line {
             spans: clipped,
             meta: LineMeta::None,
+            ..Default::default()
         });
     }
 

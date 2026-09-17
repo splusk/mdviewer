@@ -44,6 +44,16 @@ struct Renderer<'a> {
     // Task list state
     source: &'a str,
     original_source: &'a str,
+    /// Byte length of the frontmatter stripped before parsing. Added back to
+    /// every offset leaving the renderer so they index the file on disk.
+    offset_base: usize,
+    /// Number of source lines that strip removed, added to every line number.
+    line_base: usize,
+    /// Line starts of the (post-strip) parsed source, for offset→line lookup.
+    line_index: LineIndex,
+    /// Source line range of the event currently being processed.
+    src_start: usize,
+    src_end: usize,
     current_task_checked: Option<bool>,
     current_task_bracket_pos: Option<usize>,
 
@@ -81,9 +91,12 @@ enum ListKind {
 
 impl<'a> Renderer<'a> {
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         source: &'a str,
         original_source: &'a str,
+        offset_base: usize,
+        line_base: usize,
         width: usize,
         theme: &'a Theme,
         line_numbers: bool,
@@ -113,6 +126,11 @@ impl<'a> Renderer<'a> {
             list_id: 0,
             source,
             original_source,
+            offset_base,
+            line_base,
+            line_index: LineIndex::new(source),
+            src_start: 0,
+            src_end: 0,
             current_task_checked: None,
             current_task_bracket_pos: None,
             in_table: false,
@@ -207,7 +225,11 @@ impl<'a> Renderer<'a> {
                 });
             }
             spans.append(&mut self.current_spans);
-            self.lines.push(Line { spans, meta });
+            self.lines.push(Line {
+                spans,
+                meta,
+                ..Default::default()
+            });
         }
     }
 
@@ -227,6 +249,7 @@ impl<'a> Renderer<'a> {
                     },
                 }],
                 meta: LineMeta::None,
+                ..Default::default()
             });
         } else {
             self.lines.push(Line::empty());
@@ -341,6 +364,7 @@ impl<'a> Renderer<'a> {
         self.lines.push(Line {
             spans: top_spans,
             meta: LineMeta::CodeContent { block_id },
+            ..Default::default()
         });
 
         // Code lines
@@ -421,6 +445,7 @@ impl<'a> Renderer<'a> {
             self.lines.push(Line {
                 spans,
                 meta: LineMeta::CodeContent { block_id },
+                ..Default::default()
             });
         }
 
@@ -434,6 +459,7 @@ impl<'a> Renderer<'a> {
                 },
             }],
             meta: LineMeta::CodeContent { block_id },
+            ..Default::default()
         });
     }
 
@@ -479,6 +505,7 @@ impl<'a> Renderer<'a> {
                 },
             ],
             meta: LineMeta::CodeContent { block_id },
+            ..Default::default()
         });
 
         // Diagram content rows
@@ -525,6 +552,7 @@ impl<'a> Renderer<'a> {
             self.lines.push(Line {
                 spans,
                 meta: LineMeta::CodeContent { block_id },
+                ..Default::default()
             });
         }
 
@@ -538,6 +566,7 @@ impl<'a> Renderer<'a> {
                 },
             }],
             meta: LineMeta::CodeContent { block_id },
+            ..Default::default()
         });
     }
 
@@ -624,6 +653,7 @@ impl<'a> Renderer<'a> {
                     style: border_style.clone(),
                 }],
                 meta: LineMeta::None,
+                ..Default::default()
             }
         };
 
@@ -708,6 +738,7 @@ impl<'a> Renderer<'a> {
                 self.lines.push(Line {
                     spans,
                     meta: LineMeta::None,
+                    ..Default::default()
                 });
             }
 
@@ -719,7 +750,23 @@ impl<'a> Renderer<'a> {
         self.lines.push(make_rule("╰", "┴", "╯", &col_widths));
     }
 
+    /// Stamp every line an event produces with that event's source range.
+    /// Lines an event pushes without a range of its own (spacers, code-fence
+    /// chrome, image placeholder rows) inherit the last known range, so the
+    /// mapping has no holes.
     fn process(&mut self, event: Event, source_range: std::ops::Range<usize>) {
+        if !source_range.is_empty() {
+            // Wikilink rewriting never merges or splits lines, so line numbers
+            // in the preprocessed source match the original one-for-one.
+            self.src_start = self.line_index.line_of(source_range.start) + self.line_base;
+            self.src_end = (self.line_index.line_of(source_range.end - 1) + self.line_base)
+                .max(self.src_start);
+        }
+        self.process_event(event, source_range);
+        stamp_new_lines(&mut self.lines, self.src_start, self.src_end);
+    }
+
+    fn process_event(&mut self, event: Event, source_range: std::ops::Range<usize>) {
         match event {
             Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
@@ -741,6 +788,7 @@ impl<'a> Renderer<'a> {
                                 },
                             }],
                             meta: LineMeta::None,
+                            ..Default::default()
                         });
                         self.push_empty_line();
                     } else {
@@ -820,6 +868,7 @@ impl<'a> Renderer<'a> {
                                 },
                             }],
                             meta: LineMeta::None,
+                            ..Default::default()
                         });
                     }
                 }
@@ -996,6 +1045,7 @@ impl<'a> Renderer<'a> {
                                 row,
                                 total_rows,
                             },
+                            ..Default::default()
                         });
                     }
                 }
@@ -1142,6 +1192,7 @@ impl<'a> Renderer<'a> {
                         },
                     }],
                     meta: LineMeta::SlideBreak,
+                    ..Default::default()
                 });
                 self.push_empty_line();
             }
@@ -1162,7 +1213,7 @@ impl<'a> Renderer<'a> {
                         self.original_source,
                         self.source,
                         source_range.start + p,
-                    )
+                    ) + self.offset_base
                 });
                 self.current_task_bracket_pos = bracket_pos;
                 self.current_task_checked = Some(checked);
@@ -1626,6 +1677,45 @@ fn strip_frontmatter(input: &str) -> &str {
     input
 }
 
+/// Give every not-yet-stamped line at the tail the given source range.
+/// Walking back from the end rather than from a saved length is what keeps
+/// events that replace a line (a blockquote's end pops its trailing bar row
+/// before pushing a spacer) from leaving an unstamped hole behind.
+fn stamp_new_lines(lines: &mut [Line], start: usize, end: usize) {
+    for line in lines.iter_mut().rev() {
+        if line.source_line != 0 {
+            break;
+        }
+        line.source_line = start;
+        line.source_end = end;
+    }
+}
+
+/// Byte offsets of every line start in a source string, so an offset maps to
+/// a line number by binary search instead of a re-scan per lookup.
+struct LineIndex {
+    starts: Vec<usize>,
+}
+
+impl LineIndex {
+    fn new(src: &str) -> Self {
+        let mut starts = vec![0usize];
+        starts.extend(
+            src.bytes()
+                .enumerate()
+                .filter(|(_, b)| *b == b'\n')
+                .map(|(i, _)| i + 1),
+        );
+        LineIndex { starts }
+    }
+
+    /// 1-based line number containing `pos`. CRLF needs no special case: the
+    /// `\r` belongs to the line it terminates.
+    fn line_of(&self, pos: usize) -> usize {
+        self.starts.partition_point(|&s| s <= pos).max(1)
+    }
+}
+
 /// Maps a byte offset within the wikilink-preprocessed source back to the
 /// corresponding offset in the original (pre-preprocess) source. Wikilink
 /// rewriting changes text within a line but never merges or splits lines,
@@ -1675,11 +1765,20 @@ pub fn render_with(
     // frontmatter hiding off the parse is byte-for-byte what it always was.
     // `input` is also the `source` used for task-list byte offsets, so both
     // must be the same slice.
+    let full_input = input;
     let input = if hide.frontmatter {
         strip_frontmatter(input)
     } else {
         input
     };
+    // Everything downstream indexes the stripped slice, so the stripped prefix
+    // is carried as a base and added back to every offset and line number that
+    // leaves the renderer.
+    let offset_base = full_input.len() - input.len();
+    let line_base = full_input[..offset_base]
+        .bytes()
+        .filter(|b| *b == b'\n')
+        .count();
     let original_input = input;
     let preprocessed = crate::wikilink::preprocess(input);
     let input: &str = preprocessed.as_ref();
@@ -1687,6 +1786,8 @@ pub fn render_with(
     let mut renderer = Renderer::new(
         input,
         original_input,
+        offset_base,
+        line_base,
         width,
         theme,
         line_numbers,
@@ -1708,6 +1809,7 @@ pub fn render_with(
     }
 
     renderer.flush_line();
+    stamp_new_lines(&mut renderer.lines, renderer.src_start, renderer.src_end);
 
     let doc_info = DocumentInfo {
         code_blocks: renderer.code_blocks,
@@ -2304,5 +2406,165 @@ mod tests {
         }
         assert_eq!(offsets[0], original.find("[ ]").unwrap());
         assert_eq!(offsets[1], original.rfind("[ ]").unwrap());
+    }
+
+    // ── Source line mapping ─────────────────────────────────────────────────
+
+    /// (source_line, source_end) of the first line whose text contains `needle`.
+    fn src_range_of(lines: &[Line], needle: &str) -> (usize, usize) {
+        let line = lines
+            .iter()
+            .find(|l| line_text(l).contains(needle))
+            .unwrap_or_else(|| panic!("no rendered line containing {needle:?}"));
+        (line.source_line, line.source_end)
+    }
+
+    fn hiding_frontmatter() -> HideConfig {
+        HideConfig {
+            frontmatter: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn line_index_is_one_based() {
+        let idx = LineIndex::new("a\nbb\nccc\n");
+        assert_eq!(idx.line_of(0), 1);
+        assert_eq!(idx.line_of(1), 1); // the newline ends line 1
+        assert_eq!(idx.line_of(2), 2);
+        assert_eq!(idx.line_of(5), 3);
+    }
+
+    #[test]
+    fn line_index_handles_crlf() {
+        let idx = LineIndex::new("a\r\nb\r\nc");
+        assert_eq!(idx.line_of(0), 1);
+        assert_eq!(idx.line_of(1), 1); // the \r belongs to the line it ends
+        assert_eq!(idx.line_of(3), 2);
+        assert_eq!(idx.line_of(6), 3);
+    }
+
+    #[test]
+    fn line_index_handles_multibyte_utf8() {
+        // "héllo" is 6 bytes; "→" is 3.
+        let src = "héllo\n→\nx";
+        let idx = LineIndex::new(src);
+        assert_eq!(idx.line_of(0), 1);
+        assert_eq!(idx.line_of(5), 1);
+        assert_eq!(idx.line_of(src.find('→').unwrap()), 2);
+        assert_eq!(idx.line_of(src.rfind('x').unwrap()), 3);
+    }
+
+    #[test]
+    fn line_index_past_the_end_reports_the_last_line() {
+        let idx = LineIndex::new("a\nb");
+        assert_eq!(idx.line_of(9999), 2);
+    }
+
+    // R1 — line numbers index the file on disk, not the post-strip slice.
+
+    #[test]
+    fn source_lines_are_file_absolute_without_frontmatter_hiding() {
+        let (lines, _) = render_test("---\ntitle: t\n---\n# Heading\n\nBody text\n");
+        assert_eq!(src_range_of(&lines, "Heading").0, 4);
+        assert_eq!(src_range_of(&lines, "Body text").0, 6);
+    }
+
+    #[test]
+    fn source_lines_stay_file_absolute_when_frontmatter_is_hidden() {
+        let (lines, _) = render_hiding(
+            "---\ntitle: t\ntags: [a]\n---\n# Heading\n\nBody text\n",
+            &hiding_frontmatter(),
+        );
+        // The heading is on file line 5 even though the parser saw it first.
+        assert_eq!(src_range_of(&lines, "Heading").0, 5);
+        assert_eq!(src_range_of(&lines, "Body text").0, 7);
+    }
+
+    #[test]
+    fn task_bracket_offsets_index_the_file_when_frontmatter_is_hidden() {
+        let source = "---\ntitle: t\n---\n- [ ] first\n- [x] second\n";
+        let (lines, _) = render_hiding(source, &hiding_frontmatter());
+        let offsets: Vec<usize> = lines
+            .iter()
+            .filter_map(|l| match l.meta {
+                LineMeta::TaskItem { bracket_offset, .. } => Some(bracket_offset),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets.len(), 2);
+        // Offsets are what toggle_task validates against the whole file, so
+        // they must point at the brackets in `source` itself.
+        assert_eq!(offsets[0], source.find("[ ]").unwrap());
+        assert_eq!(offsets[1], source.find("[x]").unwrap());
+        assert_eq!(&source[offsets[0]..offsets[0] + 3], "[ ]");
+        assert_eq!(&source[offsets[1]..offsets[1] + 3], "[x]");
+    }
+
+    // R4 — every rendered line carries a source line; no holes to scan past.
+
+    #[test]
+    fn every_rendered_line_has_a_source_line() {
+        let input = "---\nt: x\n---\n# H\n\nPara one.\n\n```rust\nfn main() {}\n```\n\n- [ ] task\n\n> quote\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let (lines, _) = render_hiding(input, &hiding_frontmatter());
+        assert!(!lines.is_empty());
+        for (i, line) in lines.iter().enumerate() {
+            assert!(
+                line.source_line > 0 && line.source_end >= line.source_line,
+                "row {i} has no source line: {:?}",
+                line_text(line)
+            );
+        }
+    }
+
+    #[test]
+    fn source_lines_never_go_backwards() {
+        let input = "# H\n\nPara.\n\n```\ncode\n```\n\nTail.\n";
+        let (lines, _) = render_test(input);
+        let ends: Vec<usize> = lines.iter().map(|l| l.source_end).collect();
+        assert!(
+            ends.windows(2).all(|w| w[0] <= w[1]),
+            "source_end must be non-decreasing: {ends:?}"
+        );
+    }
+
+    // R3 — content that renders nothing leaves a gap the scan steps over.
+
+    #[test]
+    fn a_hidden_code_block_leaves_a_gap_in_the_mapping() {
+        let hide = HideConfig {
+            code_languages: vec!["dataviewjs".to_string()],
+            ..Default::default()
+        };
+        // dataviewjs occupies lines 3-6 and renders nothing.
+        let (lines, _) = render_hiding(
+            "Before.\n\n```dataviewjs\nhidden()\nmore()\n```\n\nAfter.\n",
+            &hide,
+        );
+        assert!(
+            !lines.iter().any(|l| line_text(l).contains("hidden()")),
+            "the code block should not render"
+        );
+        let before_end = src_range_of(&lines, "Before.").1;
+        let after_start = src_range_of(&lines, "After.").0;
+        assert!(
+            before_end < 3,
+            "the gap must start after the last shown line"
+        );
+        assert!(
+            after_start > 6,
+            "the gap must end before the next shown line"
+        );
+    }
+
+    #[test]
+    fn a_multi_line_paragraph_reports_the_line_it_starts_on() {
+        let (lines, _) = render_test("# H\n\nfirst\nsecond\nthird\n");
+        let (start, end) = src_range_of(&lines, "first");
+        assert_eq!(start, 3);
+        assert!(
+            end >= 5,
+            "the range must cover the whole paragraph, got {end}"
+        );
     }
 }
